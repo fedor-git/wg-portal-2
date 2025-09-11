@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-pkgz/routegroup"
 
+	"github.com/fedor-git/wg-portal-2/internal/app"
 	"github.com/fedor-git/wg-portal-2/internal/app/api/core/request"
 	"github.com/fedor-git/wg-portal-2/internal/app/api/core/respond"
 	"github.com/fedor-git/wg-portal-2/internal/app/api/v1/models"
@@ -28,17 +29,20 @@ type ProvisioningEndpoint struct {
 	provisioning  ProvisioningEndpointProvisioningService
 	authenticator Authenticator
 	validator     Validator
+	bus           app.EventPublisher
 }
 
 func NewProvisioningEndpoint(
 	authenticator Authenticator,
 	validator Validator,
 	provisioning ProvisioningEndpointProvisioningService,
+	bus app.EventPublisher,
 ) *ProvisioningEndpoint {
 	return &ProvisioningEndpoint{
 		authenticator: authenticator,
 		validator:     validator,
 		provisioning:  provisioning,
+		bus:           bus,
 	}
 }
 
@@ -185,24 +189,28 @@ func (e ProvisioningEndpoint) handlePeerQrGet() http.HandlerFunc {
 // @Router /provisioning/new-peer [post]
 // @Security BasicAuth
 func (e ProvisioningEndpoint) handleNewPeerPost() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req models.ProvisioningRequest
-		if err := request.BodyJson(r, &req); err != nil {
-			respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
-			return
-		}
-		if err := e.validator.Struct(req); err != nil {
-			respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
-			return
+    return func(w http.ResponseWriter, r *http.Request) {
+        var req models.ProvisioningRequest
+        if err := request.BodyJson(r, &req); err != nil {
+            respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
+            return
+        }
+        if err := e.validator.Struct(req); err != nil {
+            respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
+            return
+        }
+
+        peer, err := e.provisioning.NewPeer(r.Context(), req)
+        if err != nil {
+            status, model := ParseServiceError(err)
+            respond.JSON(w, status, model)
+            return
+        }
+
+		if e.bus != nil {
+			e.bus.Publish("peers.updated", "provisioning:new-peer")
 		}
 
-		peer, err := e.provisioning.NewPeer(r.Context(), req)
-		if err != nil {
-			status, model := ParseServiceError(err)
-			respond.JSON(w, status, model)
-			return
-		}
-
-		respond.JSON(w, http.StatusOK, models.NewPeer(peer))
-	}
+        respond.JSON(w, http.StatusOK, models.NewPeer(peer))
+    }
 }

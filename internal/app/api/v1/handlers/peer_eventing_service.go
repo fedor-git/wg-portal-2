@@ -16,7 +16,6 @@ func NewEventingPeerService(inner PeerService, bus app.EventPublisher) PeerServi
     return &eventingPeerService{inner: inner, bus: bus}
 }
 
-// ---------- read-only ----------
 func (s *eventingPeerService) GetForInterface(ctx context.Context, id domain.InterfaceIdentifier) ([]domain.Peer, error) {
     return s.inner.GetForInterface(ctx, id)
 }
@@ -30,11 +29,9 @@ func (s *eventingPeerService) Prepare(ctx context.Context, id domain.InterfaceId
     return s.inner.Prepare(ctx, id)
 }
 func (s *eventingPeerService) SyncAllPeersFromDB(ctx context.Context) (int, error) {
-    // вхідний sync нічого не фан-аутить сам по собі — і це ок
     return s.inner.SyncAllPeersFromDB(ctx)
 }
 
-// ---------- мутації + fanout ----------
 func (s *eventingPeerService) Create(ctx context.Context, p *domain.Peer) (*domain.Peer, error) {
     out, err := s.inner.Create(ctx, p)
     if err != nil { return nil, err }
@@ -58,7 +55,6 @@ func (s *eventingPeerService) Delete(ctx context.Context, id domain.PeerIdentifi
     return nil
 }
 
-// ---- helpers ----
 func (s *eventingPeerService) bumpFanout(ctx context.Context, topic string, arg any) {
     if s.bus == nil || topic == "" { return }
     if app.NoFanout(ctx) { return }    // важливо: не ехо

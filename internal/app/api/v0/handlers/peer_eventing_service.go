@@ -17,8 +17,6 @@ func NewEventingPeerService(inner PeerService, bus app.EventPublisher) PeerServi
 	return &eventingPeerService{inner: inner, bus: bus}
 }
 
-// ---------- read-only делегування ----------
-
 func (s *eventingPeerService) GetInterfaceAndPeers(ctx context.Context, id domain.InterfaceIdentifier) (*domain.Interface, []domain.Peer, error) {
 	return s.inner.GetInterfaceAndPeers(ctx, id)
 }
@@ -47,8 +45,6 @@ func (s *eventingPeerService) GetPeerStats(ctx context.Context, id domain.Interf
 	return s.inner.GetPeerStats(ctx, id)
 }
 
-// ---------- мутації + події ----------
-
 func (s *eventingPeerService) CreatePeer(ctx context.Context, p *domain.Peer) (*domain.Peer, error) {
     out, err := s.inner.CreatePeer(ctx, p)
     if err != nil { return nil, err }
@@ -61,10 +57,8 @@ func (s *eventingPeerService) CreateMultiplePeers(ctx context.Context, ifaceID d
 	out, err := s.inner.CreateMultiplePeers(ctx, ifaceID, r)
 	if err != nil { return nil, err }
 
-	// внутрішні
 	s.publish(app.TopicPeerUpdated, out)
 
-	// fanout
 	s.publish("peer.save", out)
 	s.publish("peers.updated", struct{}{})
 
@@ -87,12 +81,10 @@ func (s *eventingPeerService) DeletePeer(ctx context.Context, id domain.PeerIden
 
 func (s *eventingPeerService) publish(topic string, args ...any) {
 	if s.bus == nil || topic == "" { return }
-	// страхуємося: fanout-підписник очікує рівно 1 аргумент
 	if len(args) == 0 {
 		s.bus.Publish(topic, struct{}{})
 		return
 	}
-	// якщо передали багато — обгорнемо їх у один контейнер
 	if len(args) > 1 {
 		s.bus.Publish(topic, args)
 		return

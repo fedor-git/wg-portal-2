@@ -437,7 +437,7 @@ func (m Manager) GetUserPeerStats(ctx context.Context, id domain.UserIdentifier)
 
 func (m Manager) savePeers(ctx context.Context, peers ...*domain.Peer) error {
 	interfaces := make(map[domain.InterfaceIdentifier]struct{})
-
+	
 	for _, peer := range peers {
 		iface, err := m.db.GetInterface(ctx, peer.InterfaceIdentifier)
 		if err != nil {
@@ -463,6 +463,8 @@ func (m Manager) savePeers(ctx context.Context, peers ...*domain.Peer) error {
 		if err != nil {
 			return fmt.Errorf("save failure for peer %s: %w", peer.Identifier, err)
 		}
+		
+		slog.Debug("savePeers: adding peer to wg0.conf", "iface", peer.InterfaceIdentifier, "peer", peer.Identifier)
 
 		// publish event
 

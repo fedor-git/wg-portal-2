@@ -12,22 +12,22 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/fedor-git/wg-portal-2/internal/app"
+	"github.com/fedor-git/wg-portal-2/internal/app/wireguard"
 	cfgpkg "github.com/fedor-git/wg-portal-2/internal/config"
+	"github.com/fedor-git/wg-portal-2/internal/domain"
 )
 
-// Мінімальний інтерфейс під ваш eventbus (eventbus.go)
 type EventBus interface {
 	Subscribe(topic string, fn interface{}) error
 }
 
-// Службові заголовки
 const (
 	hdrOrigin = "X-WGP-Origin"
 	hdrNoEcho = "X-WGP-NoEcho"
 	hdrCorrID = "X-WGP-Correlation-ID"
 )
 
-// внутрішні налаштування (копія потрібних полів із cfg.Core.Fanout)
 type settings struct {
 	Enabled     bool
 	Peers       []string
@@ -41,8 +41,7 @@ type settings struct {
 	Topics      []string
 }
 
-// Публічний запуск fanout (бере все з cfg.Core.Fanout)
-func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig) {
+func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardManager *wireguard.Manager) {
 	s := settings{
 		Enabled:     fc.Enabled,
 		Peers:       append([]string(nil), fc.Peers...),
@@ -67,7 +66,6 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig) {
 		s.Debounce = 250 * time.Millisecond
 	}
 
-	// best-effort origin
 	if s.Origin == "" {
 		if host := getHost(s.SelfURL); host != "" {
 			if hn, _ := net.LookupAddr(host); len(hn) > 0 {
@@ -82,7 +80,6 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig) {
 		}
 	}
 
-	// дефолтні теми
 	if len(s.Topics) == 0 {
 		s.Topics = []string{
 			"peer:created", "peer:updated", "peer:deleted",
@@ -98,13 +95,20 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig) {
 		debounce: newDebouncer(s.Debounce),
 	}
 
-	// Підписки на конкретні топіки (НЕ wildcard)
 	if bus != nil {
 		for _, topic := range s.Topics {
 			t := topic
-			if err := bus.Subscribe(t, func() {
-				slog.Debug("[FANOUT] bump", "reason", "bus:"+t)
+			if err := bus.Subscribe(t, func(arg any) {
+				slog.Debug("[FANOUT] bump", "reason", "bus:"+t, "arg", arg)
 				f.bump("bus:" + t)
+				go func() {
+					sysCtx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
+					sysCtx = app.WithNoFanout(sysCtx)
+					_, err := wireGuardManager.SyncAllPeersFromDB(sysCtx)
+					if err != nil {
+						slog.Error("[FANOUT] SyncAllPeersFromDB failed", "err", err)
+					}
+				}()
 			}); err != nil {
 				slog.Warn("[FANOUT] subscribe failed", "topic", t, "err", err)
 			} else {
@@ -115,10 +119,8 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig) {
 		slog.Debug("[FANOUT] no bus provided, event-driven bumps disabled")
 	}
 
-	// Головний цикл
 	go f.loop(ctx)
 
-	// Перший «пинок» — уже після підписок, щоб одразу роздати sync, якщо треба
 	if s.KickOnStart {
 		f.bump("startup")
 	}
@@ -132,8 +134,6 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig) {
 		"timeout", s.Timeout.String(),
 	)
 }
-
-// ------------------ реалізація ------------------
 
 type fanout struct {
 	cfg      settings
@@ -180,12 +180,10 @@ func (f *fanout) fire(ctx context.Context) {
 				return
 			}
 
-			// Auth (за потреби)
 			if f.cfg.AuthHeader != "" && f.cfg.AuthValue != "" {
 				req.Header.Set(f.cfg.AuthHeader, f.cfg.AuthValue)
 			}
 
-			// Службові заголовки
 			req.Header.Set(hdrOrigin, f.cfg.Origin)
 			req.Header.Set(hdrNoEcho, "1")
 			req.Header.Set(hdrCorrID, uuid.NewString())
@@ -207,8 +205,6 @@ func (f *fanout) fire(ctx context.Context) {
 
 	wg.Wait()
 }
-
-// ------------------ утиліти ------------------
 
 type debouncer struct {
 	d   time.Duration
@@ -239,9 +235,7 @@ func (d *debouncer) Bump() {
 		return
 	}
 
-	// перезапуск
 	if !d.t.Stop() {
-		// якщо таймер уже майже «вистрілив», знімаємо імпульс з каналу
 		select {
 		case <-d.C:
 		default:

@@ -73,7 +73,6 @@ func (e PeerEndpoint) GetName() string {
 
 func (e *PeerEndpoint) SetEventBus(bus app.EventBus) { e.bus = bus }
 
-// ВАЖЛИВО: fanout підписаний на 1 аргумент, тож примусово даємо рівно 1
 func (e *PeerEndpoint) publish(topic string, arg any) {
     if e.bus == nil || topic == "" { return }
     slog.Debug("[V0] publish", "topic", topic)

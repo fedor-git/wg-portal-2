@@ -78,17 +78,6 @@ func main() {
 	queueSize := 100
 	eventBus := evbus.New(queueSize)
 
-	fanout.Start(ctx, eventBus, cfg.Core.Fanout)
-	// fanout.Start(ctx, eventBus, fanout.Config{
-	// 	Enabled:    cfg.Core.Fanout.Enabled,
-	// 	Peers:      cfg.Core.Fanout.Peers,
-	// 	AuthHeader: cfg.Core.Fanout.AuthHeader,
-	// 	AuthValue:  cfg.Core.Fanout.AuthValue,
-	// 	Timeout:    cfg.Core.Fanout.Timeout,
-	// 	Debounce:   cfg.Core.Fanout.Debounce,
-	// 	SelfURL:    cfg.Core.Fanout.SelfURL,
-	// })
-
 	auditManager := audit.NewManager(database)
 
 	auditRecorder, err := audit.NewAuditRecorder(cfg, eventBus, database)
@@ -109,6 +98,8 @@ func main() {
 	wireGuardManager, err := wireguard.NewWireGuardManager(cfg, eventBus, wireGuard, wgQuick, database)
 	internal.AssertNoError(err)
 	wireGuardManager.StartBackgroundJobs(ctx)
+
+	fanout.Start(ctx, eventBus, cfg.Core.Fanout, wireGuardManager)
 
 	statisticsCollector, err := wireguard.NewStatisticsCollector(cfg, eventBus, database, wireGuard, metricsServer)
 	internal.AssertNoError(err)
@@ -186,20 +177,25 @@ func main() {
 
 	apiV1Auth := handlersV1.NewAuthenticationHandler(userManager)
 	apiV1BackendUsers := backendV1.NewUserService(cfg, userManager)
-	// apiV1BackendPeers := backendV1.NewPeerService(cfg, wireGuardManager, userManager)
-	coreV1Peers := backendV1.NewPeerService(cfg, wireGuardManager, userManager)
+	apiV1BackendPeers := backendV1.NewPeerService(cfg, wireGuardManager, userManager)
+	// coreV1Peers := backendV1.NewPeerService(cfg, wireGuardManager, userManager)
 	apiV1BackendInterfaces := backendV1.NewInterfaceService(cfg, wireGuardManager)
 	apiV1BackendProvisioning := backendV1.NewProvisioningService(cfg, userManager, wireGuardManager, cfgFileManager)
 	apiV1BackendMetrics := backendV1.NewMetricsService(cfg, database, userManager, wireGuardManager)
 
 	apiV1EndpointUsers := handlersV1.NewUserEndpoint(apiV1Auth, validatorManager, apiV1BackendUsers)
-	// apiV1EndpointPeers := handlersV1.NewPeerEndpoint(apiV1Auth, validatorManager, apiV1BackendPeers)
-	apiV1BackendPeers := handlersV1.NewEventingPeerService(coreV1Peers, eventBus)
 	apiV1EndpointPeers := handlersV1.NewPeerEndpoint(apiV1Auth, validatorManager, apiV1BackendPeers)
-	//apiV1EndpointPeers.SetEventBus(eventBus)
+	// apiV1BackendPeers := handlersV1.NewEventingPeerService(coreV1Peers, eventBus)
+	// apiV1EndpointPeers := handlersV1.NewPeerEndpoint(apiV1Auth, validatorManager, apiV1BackendPeers)
+	apiV1EndpointPeers.SetEventBus(eventBus)
 	apiV1EndpointInterfaces := handlersV1.NewInterfaceEndpoint(apiV1Auth, validatorManager, apiV1BackendInterfaces)
-	apiV1EndpointProvisioning := handlersV1.NewProvisioningEndpoint(apiV1Auth, validatorManager,
-		apiV1BackendProvisioning)
+	//apiV1EndpointProvisioning := handlersV1.NewProvisioningEndpoint(apiV1Auth, validatorManager,
+	//	apiV1BackendProvisioning)
+	apiV1EndpointProvisioning := handlersV1.NewProvisioningEndpoint(apiV1Auth,
+		validatorManager,
+		apiV1BackendProvisioning,
+		eventBus, // <-- Додаємо EventBus!
+	)
 	apiV1EndpointMetrics := handlersV1.NewMetricsEndpoint(apiV1Auth, validatorManager, apiV1BackendMetrics)
 
 	apiV1 := handlersV1.NewRestApi(
