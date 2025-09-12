@@ -189,7 +189,7 @@ func main() {
 	apiV1EndpointProvisioning := handlersV1.NewProvisioningEndpoint(apiV1Auth,
 		validatorManager,
 		apiV1BackendProvisioning,
-		eventBus
+		eventBus,
 	)
 	apiV1EndpointMetrics := handlersV1.NewMetricsEndpoint(apiV1Auth, validatorManager, apiV1BackendMetrics)
 
