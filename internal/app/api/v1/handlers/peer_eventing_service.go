@@ -35,7 +35,7 @@ func (s *eventingPeerService) SyncAllPeersFromDB(ctx context.Context) (int, erro
 func (s *eventingPeerService) Create(ctx context.Context, p *domain.Peer) (*domain.Peer, error) {
     out, err := s.inner.Create(ctx, p)
     if err != nil { return nil, err }
-    s.bumpFanout(ctx, "peer.save", out)          // 1 аргумент
+    s.bumpFanout(ctx, "peer.save", out)
     s.bumpFanout(ctx, "peers.updated", "v1:create")
     return out, nil
 }
@@ -43,20 +43,20 @@ func (s *eventingPeerService) Create(ctx context.Context, p *domain.Peer) (*doma
 func (s *eventingPeerService) Update(ctx context.Context, id domain.PeerIdentifier, p *domain.Peer) (*domain.Peer, error) {
     out, err := s.inner.Update(ctx, id, p)
     if err != nil { return nil, err }
-    s.bumpFanout(ctx, "peer.save", out)          // 1 аргумент
+    s.bumpFanout(ctx, "peer.save", out)
     s.bumpFanout(ctx, "peers.updated", "v1:update")
     return out, nil
 }
 
 func (s *eventingPeerService) Delete(ctx context.Context, id domain.PeerIdentifier) error {
     if err := s.inner.Delete(ctx, id); err != nil { return err }
-    s.bumpFanout(ctx, "peer.delete", id)         // 1 аргумент
+    s.bumpFanout(ctx, "peer.delete", id)
     s.bumpFanout(ctx, "peers.updated", "v1:delete")
     return nil
 }
 
 func (s *eventingPeerService) bumpFanout(ctx context.Context, topic string, arg any) {
     if s.bus == nil || topic == "" { return }
-    if app.NoFanout(ctx) { return }    // важливо: не ехо
-    s.bus.Publish(topic, arg)          // рівно 1 аргумент
+    if app.NoFanout(ctx) { return }
+    s.bus.Publish(topic, arg)
 }

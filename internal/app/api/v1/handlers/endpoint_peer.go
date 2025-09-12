@@ -247,10 +247,10 @@ func (e PeerEndpoint) handleCreatePost() http.HandlerFunc {
 			return
 		}
 
-        e.publish(app.TopicPeerCreated)
-        e.publish(app.TopicPeerUpdated)
-        e.publish("peer.save", newPeer)
-        e.publish("peers.updated", "v1:create")
+		e.publish(app.TopicPeerCreated)
+		e.publish(app.TopicPeerUpdated)
+		e.publish("peer.save", newPeer)
+		e.publish("peers.updated", "v1:create")
 
 		respond.JSON(w, http.StatusOK, models.NewPeer(newPeer))
 	}
@@ -299,9 +299,9 @@ func (e PeerEndpoint) handleUpdatePut() http.HandlerFunc {
 			return
 		}
 
-        e.publish(app.TopicPeerUpdated)
-        e.publish("peer.save", updatedPeer)
-        e.publish("peers.updated", "v1:update")
+		e.publish(app.TopicPeerUpdated)
+		e.publish("peer.save", updatedPeer)
+		e.publish("peers.updated", "v1:update")
 
 		respond.JSON(w, http.StatusOK, models.NewPeer(updatedPeer))
 	}
@@ -338,11 +338,10 @@ func (e PeerEndpoint) handleDelete() http.HandlerFunc {
 			return
 		}
 
-		// внутрішні
-        e.publish(app.TopicPeerDeleted)
-        e.publish(app.TopicPeerUpdated)
-        e.publish("peer.delete", domain.PeerIdentifier(id))
-        e.publish("peers.updated", "v1:delete")
+		e.publish(app.TopicPeerDeleted)
+		e.publish(app.TopicPeerUpdated)
+		e.publish("peer.delete", domain.PeerIdentifier(id))
+		e.publish("peers.updated", "v1:delete")
 
 		respond.Status(w, http.StatusNoContent)
 	}

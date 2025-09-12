@@ -65,7 +65,6 @@ type EventSubscriber interface {
     Subscribe(topic string, fn interface{}) error
 }
 
-// Зручно мати комбінований інтерфейс:
 type EventBus interface {
     EventPublisher
     EventSubscriber
