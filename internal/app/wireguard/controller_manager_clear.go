@@ -2,19 +2,23 @@ package wireguard
 
 import (
 	"context"
+	"fmt"
 
-	"golang.zx2c4.com/wireguard/wgctrl"
-	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+	"github.com/fedor-git/wg-portal-2/internal/config"
+	"github.com/fedor-git/wg-portal-2/internal/domain"
 )
 
-// ClearPeers повністю очищає peers на інтерфейсі (ReplacePeers=true з порожнім списком).
-func (m *ControllerManager) ClearPeers(_ context.Context, iface string) error {
-    c, err := wgctrl.New()
-    if err != nil { return err }
-    defer c.Close()
+func (c *ControllerManager) ClearPeers(ctx context.Context, iface string) error {
+    iid := domain.InterfaceIdentifier(iface)
 
-    return c.ConfigureDevice(iface, wgtypes.Config{
-        ReplacePeers: true,
-        Peers:        []wgtypes.PeerConfig{},
-    })
+    for _, inst := range c.controllers {
+        if _, err := inst.Implementation.GetInterface(ctx, iid); err == nil {
+            return inst.Implementation.ClearPeers(ctx, iface)
+        }
+    }
+
+    if inst, ok := c.controllers[config.LocalBackendName]; ok {
+        return inst.Implementation.ClearPeers(ctx, iface)
+    }
+    return fmt.Errorf("ClearPeers: controller for %s not found", iface)
 }

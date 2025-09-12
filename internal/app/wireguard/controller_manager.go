@@ -30,6 +30,9 @@ type InterfaceController interface {
 		updateFunc func(pp *domain.PhysicalPeer) (*domain.PhysicalPeer, error),
 	) error
 	DeletePeer(_ context.Context, deviceId domain.InterfaceIdentifier, id domain.PeerIdentifier) error
+
+	ClearPeers(ctx context.Context, device string) error
+
 	PingAddresses(
 		ctx context.Context,
 		addr string,
