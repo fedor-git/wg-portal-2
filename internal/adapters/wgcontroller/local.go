@@ -862,3 +862,10 @@ func (c LocalController) PingAddresses(
 }
 
 // endregion statistics-related
+
+func (c LocalController) ClearPeers(_ context.Context, deviceId string) error {
+	return c.wg.ConfigureDevice(deviceId, wgtypes.Config{
+		ReplacePeers: true,
+		Peers:        []wgtypes.PeerConfig{},
+	})
+}

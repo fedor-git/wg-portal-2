@@ -22,12 +22,14 @@ import (
 	"github.com/fedor-git/wg-portal-2/internal/app/audit"
 	"github.com/fedor-git/wg-portal-2/internal/app/auth"
 	"github.com/fedor-git/wg-portal-2/internal/app/configfile"
+	"github.com/fedor-git/wg-portal-2/internal/app/fanout"
 	"github.com/fedor-git/wg-portal-2/internal/app/mail"
 	"github.com/fedor-git/wg-portal-2/internal/app/route"
 	"github.com/fedor-git/wg-portal-2/internal/app/users"
 	"github.com/fedor-git/wg-portal-2/internal/app/webhooks"
 	"github.com/fedor-git/wg-portal-2/internal/app/wireguard"
 	"github.com/fedor-git/wg-portal-2/internal/config"
+	"github.com/fedor-git/wg-portal-2/internal/domain"
 )
 
 // main entry point for WireGuard Portal
@@ -97,12 +99,15 @@ func main() {
 	internal.AssertNoError(err)
 	wireGuardManager.StartBackgroundJobs(ctx)
 
+	fanout.Start(ctx, eventBus, cfg.Core.Fanout, wireGuardManager)
+
 	statisticsCollector, err := wireguard.NewStatisticsCollector(cfg, eventBus, database, wireGuard, metricsServer)
 	internal.AssertNoError(err)
 	statisticsCollector.StartBackgroundJobs(ctx)
 
 	cfgFileManager, err := configfile.NewConfigFileManager(cfg, eventBus, database, database, cfgFileSystem)
 	internal.AssertNoError(err)
+    cfgFileManager.StartBackgroundJobs(ctx)
 
 	mailManager, err := mail.NewMailManager(cfg, mailer, cfgFileManager, database, database)
 	internal.AssertNoError(err)
@@ -117,6 +122,18 @@ func main() {
 
 	err = app.Initialize(cfg, wireGuardManager, userManager)
 	internal.AssertNoError(err)
+
+	if cfg.Core.SyncOnStartup {
+		syncCtx := domain.SetUserInfo(ctx, domain.SystemAdminContextUserInfo())
+		if err := wireGuardManager.RestoreInterfaceState(syncCtx, true /*updateDbOnError*/); err != nil {
+			slog.Error("initial interface restore failed", "err", err)
+		}
+		if n, err := wireGuardManager.SyncAllPeersFromDB(syncCtx); err != nil {
+			slog.Error("initial peer sync failed", "err", err)
+		} else {
+			slog.Info("initial peer sync done", "applied", n)
+		}
+	}
 
 	validatorManager := validator.New()
 
@@ -134,7 +151,11 @@ func main() {
 	apiV0EndpointAudit := handlersV0.NewAuditEndpoint(cfg, apiV0Auth, auditManager)
 	apiV0EndpointUsers := handlersV0.NewUserEndpoint(cfg, apiV0Auth, validatorManager, apiV0BackendUsers)
 	apiV0EndpointInterfaces := handlersV0.NewInterfaceEndpoint(cfg, apiV0Auth, validatorManager, apiV0BackendInterfaces)
+
 	apiV0EndpointPeers := handlersV0.NewPeerEndpoint(cfg, apiV0Auth, validatorManager, apiV0BackendPeers)
+	
+	apiV0EndpointPeers.SetEventBus(eventBus)
+
 	apiV0EndpointConfig := handlersV0.NewConfigEndpoint(cfg, apiV0Auth, wireGuard)
 	apiV0EndpointTest := handlersV0.NewTestEndpoint(apiV0Auth)
 
@@ -155,15 +176,21 @@ func main() {
 	apiV1Auth := handlersV1.NewAuthenticationHandler(userManager)
 	apiV1BackendUsers := backendV1.NewUserService(cfg, userManager)
 	apiV1BackendPeers := backendV1.NewPeerService(cfg, wireGuardManager, userManager)
+
 	apiV1BackendInterfaces := backendV1.NewInterfaceService(cfg, wireGuardManager)
 	apiV1BackendProvisioning := backendV1.NewProvisioningService(cfg, userManager, wireGuardManager, cfgFileManager)
 	apiV1BackendMetrics := backendV1.NewMetricsService(cfg, database, userManager, wireGuardManager)
 
 	apiV1EndpointUsers := handlersV1.NewUserEndpoint(apiV1Auth, validatorManager, apiV1BackendUsers)
 	apiV1EndpointPeers := handlersV1.NewPeerEndpoint(apiV1Auth, validatorManager, apiV1BackendPeers)
+
+	apiV1EndpointPeers.SetEventBus(eventBus)
 	apiV1EndpointInterfaces := handlersV1.NewInterfaceEndpoint(apiV1Auth, validatorManager, apiV1BackendInterfaces)
-	apiV1EndpointProvisioning := handlersV1.NewProvisioningEndpoint(apiV1Auth, validatorManager,
-		apiV1BackendProvisioning)
+	apiV1EndpointProvisioning := handlersV1.NewProvisioningEndpoint(apiV1Auth,
+		validatorManager,
+		apiV1BackendProvisioning,
+		eventBus
+	)
 	apiV1EndpointMetrics := handlersV1.NewMetricsEndpoint(apiV1Auth, validatorManager, apiV1BackendMetrics)
 
 	apiV1 := handlersV1.NewRestApi(

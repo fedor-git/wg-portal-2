@@ -2,10 +2,12 @@ package handlers
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-pkgz/routegroup"
 
+	"github.com/fedor-git/wg-portal-2/internal/app"
 	"github.com/fedor-git/wg-portal-2/internal/app/api/core/request"
 	"github.com/fedor-git/wg-portal-2/internal/app/api/core/respond"
 	"github.com/fedor-git/wg-portal-2/internal/app/api/v1/models"
@@ -20,12 +22,14 @@ type PeerService interface {
 	Create(context.Context, *domain.Peer) (*domain.Peer, error)
 	Update(context.Context, domain.PeerIdentifier, *domain.Peer) (*domain.Peer, error)
 	Delete(context.Context, domain.PeerIdentifier) error
+	SyncAllPeersFromDB(ctx context.Context) (int, error)
 }
 
 type PeerEndpoint struct {
 	peers         PeerService
 	authenticator Authenticator
 	validator     Validator
+	bus           app.EventBus
 }
 
 func NewPeerEndpoint(
@@ -43,6 +47,18 @@ func (e PeerEndpoint) GetName() string {
 	return "PeerEndpoint"
 }
 
+func (e *PeerEndpoint) SetEventBus(bus app.EventBus) {
+    e.bus = bus
+}
+
+func (e *PeerEndpoint) publish(topic string, args ...any) {
+    if e.bus == nil || topic == "" {
+        return
+    }
+	slog.Debug("[V1] publish", "topic", topic)
+    e.bus.Publish(topic, args...)
+}
+
 func (e PeerEndpoint) RegisterRoutes(g *routegroup.Bundle) {
 	apiGroup := g.Mount("/peer")
 	apiGroup.Use(e.authenticator.LoggedIn())
@@ -56,6 +72,8 @@ func (e PeerEndpoint) RegisterRoutes(g *routegroup.Bundle) {
 	apiGroup.With(e.authenticator.LoggedIn(ScopeAdmin)).HandleFunc("POST /new", e.handleCreatePost())
 	apiGroup.With(e.authenticator.LoggedIn(ScopeAdmin)).HandleFunc("PUT /by-id/{id}", e.handleUpdatePut())
 	apiGroup.With(e.authenticator.LoggedIn(ScopeAdmin)).HandleFunc("DELETE /by-id/{id}", e.handleDelete())
+	apiGroup.With(e.authenticator.LoggedIn(ScopeAdmin)).HandleFunc("POST /sync", e.handleSyncPost())
+
 }
 
 // handleAllForInterfaceGet returns a gorm Handler function.
@@ -229,6 +247,11 @@ func (e PeerEndpoint) handleCreatePost() http.HandlerFunc {
 			return
 		}
 
+		e.publish(app.TopicPeerCreated)
+		e.publish(app.TopicPeerUpdated)
+		e.publish("peer.save", newPeer)
+		e.publish("peers.updated", "v1:create")
+
 		respond.JSON(w, http.StatusOK, models.NewPeer(newPeer))
 	}
 }
@@ -276,6 +299,10 @@ func (e PeerEndpoint) handleUpdatePut() http.HandlerFunc {
 			return
 		}
 
+		e.publish(app.TopicPeerUpdated)
+		e.publish("peer.save", updatedPeer)
+		e.publish("peers.updated", "v1:update")
+
 		respond.JSON(w, http.StatusOK, models.NewPeer(updatedPeer))
 	}
 }
@@ -311,6 +338,24 @@ func (e PeerEndpoint) handleDelete() http.HandlerFunc {
 			return
 		}
 
+		e.publish(app.TopicPeerDeleted)
+		e.publish(app.TopicPeerUpdated)
+		e.publish("peer.delete", domain.PeerIdentifier(id))
+		e.publish("peers.updated", "v1:delete")
+
 		respond.Status(w, http.StatusNoContent)
 	}
+}
+
+
+func (e PeerEndpoint) handleSyncPost() http.HandlerFunc {
+    return func(w http.ResponseWriter, r *http.Request) {
+        ctx := r.Context()
+        if r.Header.Get("X-WGP-NoEcho") == "1" {
+            ctx = app.WithNoFanout(ctx)
+        }
+        count, err := e.peers.SyncAllPeersFromDB(ctx)
+        if err != nil { /* ... */ }
+        respond.JSON(w, http.StatusOK, map[string]any{"synced": count})
+    }
 }

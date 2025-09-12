@@ -827,3 +827,7 @@ func (c *MikrotikController) PingAddresses(
 }
 
 // endregion statistics-related
+
+func (c *MikrotikController) ClearPeers(_ context.Context, device string) error {
+    return fmt.Errorf("ClearPeers not supported for Mikrotik backend (device=%s)", device)
+}
