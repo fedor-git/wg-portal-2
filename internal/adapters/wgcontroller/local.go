@@ -709,7 +709,20 @@ func (c LocalController) getRulePriority(existingRules []netlink.Rule) int {
 }
 
 func (c LocalController) setMainRule(rules []domain.RouteRule) error {
+	wantKillSwitch := false
 	var family domain.IpFamily
+
+	for _, r := range rules {
+		family = r.IpFamily
+		if r.FwMark != 0 && r.Table != unix.RT_TABLE_MAIN && r.HasDefault {
+			wantKillSwitch = true
+			break
+		}
+	}
+	if !wantKillSwitch {
+		return nil
+	}
+
 	shouldHaveMainRule := false
 	for _, rule := range rules {
 		family = rule.IpFamily
