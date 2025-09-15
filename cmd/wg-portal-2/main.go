@@ -55,7 +55,7 @@ func main() {
 	wireGuard, err := wireguard.NewControllerManager(cfg)
 	internal.AssertNoError(err)
 
-	wgQuick := adapters.NewWgQuickRepo()
+	wgQuick := adapters.NewWgQuickRepo(cfg)
 
 	mailer := adapters.NewSmtpMailRepo(cfg.Mail)
 

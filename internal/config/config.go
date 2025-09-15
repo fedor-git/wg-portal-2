@@ -41,7 +41,10 @@ type Config struct {
 		RestoreState                bool `yaml:"restore_state"`
 		SyncOnStartup               bool `mapstructure:"sync_on_startup" yaml:"sync_on_startup" env:"WG_SYNC_ON_STARTUP"`
 
-		Fanout              FanoutConfig `yaml:"fanout"`
+		ManageDns                   bool `yaml:"manage_dns"` // Controls if wg-portal should manage DNS via resolvconf
+		IgnoreMainDefaultRoute      bool `yaml:"ignore_main_default_route"`
+
+		Fanout                       FanoutConfig `yaml:"fanout"`
 	} `yaml:"core"`
 
 	Advanced struct {
@@ -141,6 +144,9 @@ func defaultConfig() *Config {
 	cfg.Core.ReEnablePeerAfterUserEnable = true
 	cfg.Core.DeletePeerAfterUserDeleted = false
 
+	cfg.Core.ManageDns = true
+	cfg.Core.IgnoreMainDefaultRoute = false
+	
 	cfg.Database = DatabaseConfig{
 		Type: "sqlite",
 		DSN:  "data/sqlite.db",

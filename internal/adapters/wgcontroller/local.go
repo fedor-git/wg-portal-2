@@ -18,7 +18,6 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
-	"github.com/fedor-git/wg-portal-2/internal"
 	"github.com/fedor-git/wg-portal-2/internal/config"
 	"github.com/fedor-git/wg-portal-2/internal/domain"
 	"github.com/fedor-git/wg-portal-2/internal/lowlevel"
@@ -560,22 +559,41 @@ func (c LocalController) ExecuteInterfaceHook(id domain.InterfaceIdentifier, hoo
 	return nil
 }
 
-func (c LocalController) SetDNS(id domain.InterfaceIdentifier, dnsStr, dnsSearchStr string) error {
-	if dnsStr == "" && dnsSearchStr == "" {
+func (c *LocalController) SetDNS(id domain.InterfaceIdentifier, dnsStr, dnsSearchStr string) error {
+	if !c.cfg.Core.ManageDns {
+		slog.Debug("DNS management is disabled in the config, skipping SetDNS.", "interface", id)
 		return nil
 	}
 
-	dnsServers := internal.SliceString(dnsStr)
-	dnsSearchDomains := internal.SliceString(dnsSearchStr)
+	if dnsStr == "" && dnsSearchStr == "" {
+		return nil
+	}
+	if _, err := exec.LookPath("resolvconf"); err != nil {
+		slog.Warn("resolvconf not found, skip DNS apply", "interface", id)
+		return nil
+	}
+	if f, err := os.OpenFile("/etc/resolv.conf", os.O_WRONLY|os.O_APPEND, 0); err != nil {
+		slog.Warn("resolv.conf not writable, skip DNS apply", "interface", id, "err", err)
+		return nil
+	} else {
+		_ = f.Close()
+	}
+
+	dnsServers := strings.Split(dnsStr, ",")
+	dnsSearchDomains := strings.Split(dnsSearchStr, ",")
 
 	dnsCommand := "resolvconf -a %resPref%i -m 0 -x"
 	dnsCommandInput := make([]string, 0, len(dnsServers)+len(dnsSearchDomains))
 
 	for _, dnsServer := range dnsServers {
-		dnsCommandInput = append(dnsCommandInput, fmt.Sprintf("nameserver %s", dnsServer))
+		if dnsServer != "" {
+			dnsCommandInput = append(dnsCommandInput, fmt.Sprintf("nameserver %s", dnsServer))
+		}
 	}
 	for _, searchDomain := range dnsSearchDomains {
-		dnsCommandInput = append(dnsCommandInput, fmt.Sprintf("search %s", searchDomain))
+		if searchDomain != "" {
+			dnsCommandInput = append(dnsCommandInput, fmt.Sprintf("search %s", searchDomain))
+		}
 	}
 
 	err := c.exec(dnsCommand, id, dnsCommandInput...)
@@ -589,7 +607,12 @@ func (c LocalController) SetDNS(id domain.InterfaceIdentifier, dnsStr, dnsSearch
 	return nil
 }
 
-func (c LocalController) UnsetDNS(id domain.InterfaceIdentifier) error {
+func (c *LocalController) UnsetDNS(id domain.InterfaceIdentifier) error {
+	if !c.cfg.Core.ManageDns {
+		slog.Debug("DNS management is disabled in the config, skipping UnsetDNS.", "interface", id)
+		return nil
+	}
+
 	dnsCommand := "resolvconf -d %resPref%i -f"
 
 	err := c.exec(dnsCommand, id)
@@ -709,19 +732,7 @@ func (c LocalController) getRulePriority(existingRules []netlink.Rule) int {
 }
 
 func (c LocalController) setMainRule(rules []domain.RouteRule) error {
-	wantKillSwitch := false
 	var family domain.IpFamily
-
-	for _, r := range rules {
-		family = r.IpFamily
-		if r.FwMark != 0 && r.Table != unix.RT_TABLE_MAIN && r.HasDefault {
-			wantKillSwitch = true
-			break
-		}
-	}
-	if !wantKillSwitch {
-		return nil
-	}
 
 	shouldHaveMainRule := false
 	for _, rule := range rules {

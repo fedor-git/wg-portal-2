@@ -7,19 +7,23 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/fedor-git/wg-portal-2/internal/config"
+
 	"github.com/fedor-git/wg-portal-2/internal"
 	"github.com/fedor-git/wg-portal-2/internal/domain"
 )
 
 // WgQuickRepo implements higher level wg-quick like interactions like setting DNS, routing tables or interface hooks.
 type WgQuickRepo struct {
+	cfg                   *config.Config
 	shellCmd              string
 	resolvConfIfacePrefix string
 }
 
 // NewWgQuickRepo creates a new WgQuickRepo instance.
-func NewWgQuickRepo() *WgQuickRepo {
+func NewWgQuickRepo(cfg *config.Config) *WgQuickRepo {
 	return &WgQuickRepo{
+		cfg:                   cfg,
 		shellCmd:              "bash",
 		resolvConfIfacePrefix: "tun.",
 	}
@@ -45,6 +49,11 @@ func (r *WgQuickRepo) ExecuteInterfaceHook(id domain.InterfaceIdentifier, hookCm
 
 // SetDNS sets the DNS settings for the given interface. It uses resolvconf to set the DNS settings.
 func (r *WgQuickRepo) SetDNS(id domain.InterfaceIdentifier, dnsStr, dnsSearchStr string) error {
+	if !r.cfg.Core.ManageDns {
+		slog.Debug("DNS management is disabled in the config, skipping SetDNS.", "interface", id)
+		return nil
+	}
+
 	if dnsStr == "" && dnsSearchStr == "" {
 		return nil
 	}
@@ -75,6 +84,11 @@ func (r *WgQuickRepo) SetDNS(id domain.InterfaceIdentifier, dnsStr, dnsSearchStr
 
 // UnsetDNS unsets the DNS settings for the given interface. It uses resolvconf to unset the DNS settings.
 func (r *WgQuickRepo) UnsetDNS(id domain.InterfaceIdentifier) error {
+	if !r.cfg.Core.ManageDns {
+		slog.Debug("DNS management is disabled in the config, skipping UnsetDNS.", "interface", id)
+		return nil
+	}
+
 	dnsCommand := "resolvconf -d %resPref%i -f"
 
 	err := r.exec(dnsCommand, id)
