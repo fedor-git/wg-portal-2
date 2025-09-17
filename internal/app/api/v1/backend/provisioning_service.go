@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/fedor-git/wg-portal-2/internal/app/api/v1/models"
 	"github.com/fedor-git/wg-portal-2/internal/config"
@@ -169,6 +170,14 @@ func (p ProvisioningService) NewPeer(ctx context.Context, req models.Provisionin
 		peer.GenerateDisplayName("API")
 	}
 
+	if req.ExpiresAt != "" {
+		expiryDate, err := time.Parse("2006-01-02", req.ExpiresAt)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ExpiresAt format: %w", err)
+		}
+		peer.ExpiresAt = &expiryDate
+	}
+
 	// save new peer
 	peer, err = p.peers.CreatePeer(ctx, peer)
 	if err != nil {
@@ -176,4 +185,23 @@ func (p ProvisioningService) NewPeer(ctx context.Context, req models.Provisionin
 	}
 
 	return peer, nil
+}
+
+func (p ProvisioningService) FindPeerByDisplayNameAndUserIdentifier(ctx context.Context, displayName, userIdentifier string) (*domain.Peer, error) {
+	peers, err := p.peers.GetUserPeers(ctx, domain.UserIdentifier(userIdentifier))
+	if err != nil {
+		return nil, err
+	}
+
+	for _, peer := range peers {
+		if peer.DisplayName == displayName {
+			return &peer, nil
+		}
+	}
+
+	return nil, domain.ErrNotFound
+}
+
+func (p ProvisioningService) GetConfig() *config.Config {
+	return p.cfg
 }
