@@ -11,16 +11,16 @@ import (
 )
 
 type FanoutConfig struct {
-    Enabled     bool          `yaml:"enabled"`
-    Peers       []string      `yaml:"peers"`
-    AuthHeader  string        `yaml:"auth_header"`
-    AuthValue   string        `yaml:"auth_value"`
-    Timeout     time.Duration `yaml:"timeout"`
-    Debounce    time.Duration `yaml:"debounce"`
-    SelfURL     string        `yaml:"self_url"`
-    Origin      string        `yaml:"origin" mapstructure:"origin"`
-    KickOnStart bool          `yaml:"kick_on_start" mapstructure:"kick_on_start"`
-    Topics      []string      `yaml:"topics" mapstructure:"topics"`
+	Enabled     bool          `yaml:"enabled"`
+	Peers       []string      `yaml:"peers"`
+	AuthHeader  string        `yaml:"auth_header"`
+	AuthValue   string        `yaml:"auth_value"`
+	Timeout     time.Duration `yaml:"timeout"`
+	Debounce    time.Duration `yaml:"debounce"`
+	SelfURL     string        `yaml:"self_url"`
+	Origin      string        `yaml:"origin" mapstructure:"origin"`
+	KickOnStart bool          `yaml:"kick_on_start" mapstructure:"kick_on_start"`
+	Topics      []string      `yaml:"topics" mapstructure:"topics"`
 }
 
 // Config is the main configuration struct.
@@ -45,6 +45,7 @@ type Config struct {
 		IgnoreMainDefaultRoute      bool `yaml:"ignore_main_default_route"`
 
 		Fanout                       FanoutConfig `yaml:"fanout"`
+		DeleteExpiredPeers           bool          `yaml:"delete_expired_peers"` // Option to delete expired peers instead of disabling them.
 	} `yaml:"core"`
 
 	Advanced struct {
@@ -143,10 +144,11 @@ func defaultConfig() *Config {
 	cfg.Core.SelfProvisioningAllowed = false
 	cfg.Core.ReEnablePeerAfterUserEnable = true
 	cfg.Core.DeletePeerAfterUserDeleted = false
+	cfg.Core.DeleteExpiredPeers = false
 
 	cfg.Core.ManageDns = true
 	cfg.Core.IgnoreMainDefaultRoute = false
-	
+
 	cfg.Database = DatabaseConfig{
 		Type: "sqlite",
 		DSN:  "data/sqlite.db",
