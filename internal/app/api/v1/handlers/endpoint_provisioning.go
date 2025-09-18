@@ -2,8 +2,10 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-pkgz/routegroup"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/fedor-git/wg-portal-2/internal/app/api/core/request"
 	"github.com/fedor-git/wg-portal-2/internal/app/api/core/respond"
 	"github.com/fedor-git/wg-portal-2/internal/app/api/v1/models"
+	"github.com/fedor-git/wg-portal-2/internal/config"
 	"github.com/fedor-git/wg-portal-2/internal/domain"
 )
 
@@ -23,6 +26,8 @@ type ProvisioningEndpointProvisioningService interface {
 	GetPeerConfig(ctx context.Context, peerId domain.PeerIdentifier) ([]byte, error)
 	GetPeerQrPng(ctx context.Context, peerId domain.PeerIdentifier) ([]byte, error)
 	NewPeer(ctx context.Context, req models.ProvisioningRequest) (*domain.Peer, error)
+	FindPeerByDisplayNameAndUserIdentifier(ctx context.Context, displayName, userIdentifier string) (*domain.Peer, error)
+	GetConfig() *config.Config
 }
 
 type ProvisioningEndpoint struct {
@@ -189,28 +194,54 @@ func (e ProvisioningEndpoint) handlePeerQrGet() http.HandlerFunc {
 // @Router /provisioning/new-peer [post]
 // @Security BasicAuth
 func (e ProvisioningEndpoint) handleNewPeerPost() http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        var req models.ProvisioningRequest
-        if err := request.BodyJson(r, &req); err != nil {
-            respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
-            return
-        }
-        if err := e.validator.Struct(req); err != nil {
-            respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
-            return
-        }
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req models.ProvisioningRequest
+		if err := request.BodyJson(r, &req); err != nil {
+			respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
+			return
+		}
+		if err := e.validator.Struct(req); err != nil {
+			respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
+			return
+		}
 
-        peer, err := e.provisioning.NewPeer(r.Context(), req)
-        if err != nil {
-            status, model := ParseServiceError(err)
-            respond.JSON(w, status, model)
-            return
-        }
+		// Set default Expiry date if not provided
+		if req.ExpiresAt == "" {
+			ttl := e.provisioning.GetConfig().Core.DefaultUserTTL
+			currentDate := time.Now()
+			expiryDate := currentDate.AddDate(0, 0, ttl) // Add TTL days to the current date
+			req.ExpiresAt = expiryDate.Format(models.ExpiryDateTimeLayout)
+		}
+
+		// Check for existing peer with the same DisplayName and UserIdentifier
+		existingPeer, err := e.provisioning.FindPeerByDisplayNameAndUserIdentifier(r.Context(), req.DisplayName, req.UserIdentifier)
+		if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			status, model := ParseServiceError(err)
+			respond.JSON(w, status, model)
+			return
+		}
+		if existingPeer != nil {
+			respond.JSON(w, http.StatusOK, struct {
+				Status string        `json:"status"`
+				Peer   models.Peer   `json:"peer"`
+			}{
+				Status: "existing",
+				Peer:   *models.NewPeer(existingPeer),
+			})
+			return
+		}
+
+		peer, err := e.provisioning.NewPeer(r.Context(), req)
+		if err != nil {
+			status, model := ParseServiceError(err)
+			respond.JSON(w, status, model)
+			return
+		}
 
 		if e.bus != nil {
 			e.bus.Publish("peers.updated", "provisioning:new-peer")
 		}
 
-        respond.JSON(w, http.StatusOK, models.NewPeer(peer))
-    }
+		respond.JSON(w, http.StatusOK, models.NewPeer(peer))
+	}
 }

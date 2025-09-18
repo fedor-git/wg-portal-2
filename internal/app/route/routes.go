@@ -150,14 +150,19 @@ func (m Manager) syncRoutes(ctx context.Context) error {
 			return fmt.Errorf("failed to get table and fwmark for %s: %w", iface.Identifier, err)
 		}
 
+		if table == 0 && fwmark == 0 {
+			slog.Debug("route management disabled for interface; skip", "interface", iface.Identifier)
+			continue
+		}
+
 		if err := m.setInterfaceRoutes(link, table, allowedIPs); err != nil {
 			return fmt.Errorf("failed to set routes for %s: %w", iface.Identifier, err)
 		}
 
-		if err := m.removeDeprecatedRoutes(link, netlink.FAMILY_V4, allowedIPs); err != nil {
+		if err := m.removeDeprecatedRoutes(link, netlink.FAMILY_V4, allowedIPs, table); err != nil {
 			return fmt.Errorf("failed to remove deprecated v4 routes for %s: %w", iface.Identifier, err)
 		}
-		if err := m.removeDeprecatedRoutes(link, netlink.FAMILY_V6, allowedIPs); err != nil {
+		if err := m.removeDeprecatedRoutes(link, netlink.FAMILY_V6, allowedIPs, table); err != nil {
 			return fmt.Errorf("failed to remove deprecated v6 routes for %s: %w", iface.Identifier, err)
 		}
 
@@ -261,9 +266,14 @@ func (m Manager) removeFwMarkRules(fwmark uint32, table int, family int) error {
 }
 
 func (m Manager) setMainRule(rules []routeRuleInfo, family int) error {
+	if m.cfg.Core.IgnoreMainDefaultRoute {
+		slog.Debug("Ignoring main default route as per config")
+		return nil
+	}
+
 	shouldHaveMainRule := false
 	for _, rule := range rules {
-		if rule.hasDefault == true {
+		if rule.hasDefault && rule.fwMark != 0 && rule.table != unix.RT_TABLE_MAIN {
 			shouldHaveMainRule = true
 			break
 		}
@@ -307,6 +317,11 @@ func (m Manager) setMainRule(rules []routeRuleInfo, family int) error {
 }
 
 func (m Manager) cleanupMainRule(rules []routeRuleInfo, family int) error {
+	if m.cfg.Core.IgnoreMainDefaultRoute {
+		slog.Debug("Ignoring main default route cleanup as per config")
+		return nil
+	}
+
 	existingRules, err := m.nl.RuleList(family)
 	if err != nil {
 		return fmt.Errorf("failed to get existing rules for family %d: %w", family, err)
@@ -396,6 +411,7 @@ func (m Manager) setInterfaceRoutes(link netlink.Link, table int, allowedIPs []d
 			Table:     table,
 			Scope:     unix.RT_SCOPE_LINK,
 			Type:      unix.RTN_UNICAST,
+			Protocol:  unix.RTPROT_STATIC,
 		})
 		if err != nil {
 			return fmt.Errorf("failed to add/update route %s: %w", allowedIP.String(), err)
@@ -405,16 +421,18 @@ func (m Manager) setInterfaceRoutes(link netlink.Link, table int, allowedIPs []d
 	return nil
 }
 
-func (m Manager) removeDeprecatedRoutes(link netlink.Link, family int, allowedIPs []domain.Cidr) error {
+func (m Manager) removeDeprecatedRoutes(link netlink.Link, family int, allowedIPs []domain.Cidr, table int) error {
 	rawRoutes, err := m.nl.RouteListFiltered(family, &netlink.Route{
 		LinkIndex: link.Attrs().Index,
-		Table:     unix.RT_TABLE_UNSPEC, // all tables
+		// Table:     unix.RT_TABLE_UNSPEC, // all tables
+		Table:     table, // only our managed table
 		Scope:     unix.RT_SCOPE_LINK,
 		Type:      unix.RTN_UNICAST,
 	}, netlink.RT_FILTER_TABLE|netlink.RT_FILTER_TYPE|netlink.RT_FILTER_OIF)
 	if err != nil {
-		return fmt.Errorf("failed to fetch raw routes: %w", err)
-	}
+ 		return fmt.Errorf("failed to fetch raw routes: %w", err)
+ 	}
+
 	for _, rawRoute := range rawRoutes {
 		if rawRoute.Dst == nil { // handle default route
 			var netlinkAddr domain.Cidr
@@ -439,6 +457,7 @@ func (m Manager) removeDeprecatedRoutes(link netlink.Link, family int, allowedIP
 			continue
 		}
 
+		slog.Debug("route delete candidate","dst", rawRoute.Dst, "table", rawRoute.Table, "oif", rawRoute.LinkIndex, "family", family)
 		err := m.nl.RouteDel(&rawRoute)
 		if err != nil {
 			return fmt.Errorf("failed to remove deprecated route %s: %w", netlinkAddr.String(), err)
@@ -451,9 +470,13 @@ func (m Manager) getRoutingTableAndFwMark(iface *domain.Interface, link netlink.
 	table int,
 	fwmark uint32,
 	err error,
-) {
+	) {
 	table = iface.GetRoutingTable()
 	fwmark = iface.FirewallMark
+
+	if table == 0 && fwmark == 0 {
+		return 0, 0, nil
+	}
 
 	if fwmark == 0 {
 		// generate a new (temporary) firewall mark based on the interface index

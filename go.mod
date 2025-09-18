@@ -1,6 +1,6 @@
 module github.com/fedor-git/wg-portal-2
 
-go 1.24.0
+go 1.24
 
 require (
 	github.com/a8m/envsubst v1.4.3

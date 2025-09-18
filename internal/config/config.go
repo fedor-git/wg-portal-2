@@ -11,16 +11,16 @@ import (
 )
 
 type FanoutConfig struct {
-    Enabled     bool          `yaml:"enabled"`
-    Peers       []string      `yaml:"peers"`
-    AuthHeader  string        `yaml:"auth_header"`
-    AuthValue   string        `yaml:"auth_value"`
-    Timeout     time.Duration `yaml:"timeout"`
-    Debounce    time.Duration `yaml:"debounce"`
-    SelfURL     string        `yaml:"self_url"`
-    Origin      string        `yaml:"origin" mapstructure:"origin"`
-    KickOnStart bool          `yaml:"kick_on_start" mapstructure:"kick_on_start"`
-    Topics      []string      `yaml:"topics" mapstructure:"topics"`
+	Enabled     bool          `yaml:"enabled"`
+	Peers       []string      `yaml:"peers"`
+	AuthHeader  string        `yaml:"auth_header"`
+	AuthValue   string        `yaml:"auth_value"`
+	Timeout     time.Duration `yaml:"timeout"`
+	Debounce    time.Duration `yaml:"debounce"`
+	SelfURL     string        `yaml:"self_url"`
+	Origin      string        `yaml:"origin" mapstructure:"origin"`
+	KickOnStart bool          `yaml:"kick_on_start" mapstructure:"kick_on_start"`
+	Topics      []string      `yaml:"topics" mapstructure:"topics"`
 }
 
 // Config is the main configuration struct.
@@ -41,7 +41,12 @@ type Config struct {
 		RestoreState                bool `yaml:"restore_state"`
 		SyncOnStartup               bool `mapstructure:"sync_on_startup" yaml:"sync_on_startup" env:"WG_SYNC_ON_STARTUP"`
 
-		Fanout              FanoutConfig `yaml:"fanout"`
+		ManageDns                   bool `yaml:"manage_dns"` // Controls if wg-portal should manage DNS via resolvconf
+		IgnoreMainDefaultRoute      bool `yaml:"ignore_main_default_route"`
+
+		Fanout                       FanoutConfig `yaml:"fanout"`
+		DeleteExpiredPeers           bool          `yaml:"delete_expired_peers"` // Option to delete expired peers instead of disabling them.
+		DefaultUserTTL               int           `yaml:"default_user_ttl"` // Default TTL (in days) for new users.
 	} `yaml:"core"`
 
 	Advanced struct {
@@ -140,6 +145,11 @@ func defaultConfig() *Config {
 	cfg.Core.SelfProvisioningAllowed = false
 	cfg.Core.ReEnablePeerAfterUserEnable = true
 	cfg.Core.DeletePeerAfterUserDeleted = false
+	cfg.Core.DeleteExpiredPeers = false
+
+	cfg.Core.ManageDns = true
+	cfg.Core.IgnoreMainDefaultRoute = false
+	cfg.Core.DefaultUserTTL = 0
 
 	cfg.Database = DatabaseConfig{
 		Type: "sqlite",

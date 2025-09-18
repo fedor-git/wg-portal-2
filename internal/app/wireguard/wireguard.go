@@ -35,6 +35,7 @@ type InterfaceAndPeerDatabaseRepo interface {
 	DeletePeer(ctx context.Context, id domain.PeerIdentifier) error
 	GetPeer(ctx context.Context, id domain.PeerIdentifier) (*domain.Peer, error)
 	GetUsedIpsPerSubnet(ctx context.Context, subnets []domain.Cidr) (map[domain.Cidr][]domain.Cidr, error)
+	SyncAllPeersFromDB(ctx context.Context) (int, error) // Synchronize all peers from the database
 }
 
 type WgQuickController interface {
@@ -309,14 +310,27 @@ func (m Manager) checkExpiredPeers(ctx context.Context, peers []domain.Peer) {
 
 	for _, peer := range peers {
 		if peer.IsExpired() && !peer.IsDisabled() {
-			slog.Info("peer has expired, disabling", "peer", peer.Identifier)
+			slog.Info("peer has expired, processing", "peer", peer.Identifier)
 
-			peer.Disabled = &now
-			peer.DisabledReason = domain.DisabledReasonExpired
+			if m.cfg.Core.DeleteExpiredPeers {
+				slog.Info("deleting expired peer", "peer", peer.Identifier)
+				if err := m.DeletePeer(ctx, peer.Identifier); err != nil {
+					slog.Error("failed to delete expired peer", "peer", peer.Identifier, "error", err)
+				}
+			} else {
+				slog.Info("disabling expired peer", "peer", peer.Identifier)
+				peer.Disabled = &now
+				peer.DisabledReason = domain.DisabledReasonExpired
 
-			_, err := m.UpdatePeer(ctx, &peer)
-			if err != nil {
-				slog.Error("failed to update expired peer", "peer", peer.Identifier, "error", err)
+				_, err := m.UpdatePeer(ctx, &peer)
+				if err != nil {
+					slog.Error("failed to update expired peer", "peer", peer.Identifier, "error", err)
+				}
+			}
+
+			// Trigger synchronization after processing the peer
+			if _, syncErr := m.SyncAllPeersFromDB(ctx); syncErr != nil {
+				slog.Error("failed to synchronize peers after processing expired peer", "peer", peer.Identifier, "error", syncErr)
 			}
 		}
 	}

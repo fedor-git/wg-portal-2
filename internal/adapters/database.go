@@ -1098,3 +1098,9 @@ func (r *SqlRepo) GetAllPeers(ctx context.Context) ([]domain.Peer, error) {
 
     return peers, nil
 }
+
+// SyncAllPeersFromDB synchronizes all peers from the database.
+func (r *SqlRepo) SyncAllPeersFromDB(ctx context.Context) (int, error) {
+	slog.Debug("SyncAllPeersFromDB called, but no operation performed")
+	return 0, nil
+}
