@@ -154,7 +154,6 @@ func (e PeerEndpoint) handleSingleGet() http.HandlerFunc {
 				model.Error{Code: http.StatusInternalServerError, Message: err.Error()})
 			return
 		}
-
 		respond.JSON(w, http.StatusOK, model.NewPeer(peer))
 	}
 }
@@ -363,10 +362,10 @@ func (e PeerEndpoint) handleDelete() http.HandlerFunc {
 				model.Error{Code: http.StatusInternalServerError, Message: err.Error()})
 			return
 		}
-
+		
 		e.publish(app.TopicFanPeerDelete, domain.PeerIdentifier(id))
 		e.publish(app.TopicFanPeersUpdated, "v0:delete")
-
+		
 		respond.Status(w, http.StatusNoContent)
 	}
 }

@@ -2,8 +2,10 @@ package backend
 
 import (
 	"context"
+	"fmt"
 	"io"
 
+	"github.com/fedor-git/wg-portal-2/internal/adapters"
 	"github.com/fedor-git/wg-portal-2/internal/config"
 	"github.com/fedor-git/wg-portal-2/internal/domain"
 )
@@ -41,6 +43,7 @@ type PeerService struct {
 	cfg *config.Config
 
 	peers      PeerServicePeerManager
+	metrics    *adapters.MetricsServer
 	configFile PeerServiceConfigFileManager
 	mailer     PeerServiceMailManager
 }
@@ -48,12 +51,14 @@ type PeerService struct {
 func NewPeerService(
 	cfg *config.Config,
 	peers PeerServicePeerManager,
+	metrics *adapters.MetricsServer,
 	configFile PeerServiceConfigFileManager,
 	mailer PeerServiceMailManager,
 ) *PeerService {
 	return &PeerService{
 		cfg:        cfg,
 		peers:      peers,
+		metrics:    metrics,
 		configFile: configFile,
 		mailer:     mailer,
 	}
@@ -91,8 +96,24 @@ func (p PeerService) UpdatePeer(ctx context.Context, peer *domain.Peer) (*domain
 	return p.peers.UpdatePeer(ctx, peer)
 }
 
+// Updated DeletePeer to use MetricsServer
 func (p PeerService) DeletePeer(ctx context.Context, id domain.PeerIdentifier) error {
-	return p.peers.DeletePeer(ctx, id)
+	peer, err := p.peers.GetPeer(ctx, id)
+	if err != nil {
+		return fmt.Errorf("failed to fetch peer for deletion: %w", err)
+	}
+
+	// Remove metrics for the peer
+	if p.metrics != nil {
+		p.metrics.RemovePeerMetrics(peer)
+	}
+
+	// Delete the peer
+	if err := p.peers.DeletePeer(ctx, id); err != nil {
+		return fmt.Errorf("failed to delete peer: %w", err)
+	}
+
+	return nil
 }
 
 func (p PeerService) GetPeerConfig(ctx context.Context, id domain.PeerIdentifier, style string) (io.Reader, error) {

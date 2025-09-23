@@ -69,3 +69,5 @@ type EventBus interface {
     EventPublisher
     EventSubscriber
 }
+
+// Removed the SubscribeToPeerDelete function as it has been moved to peer_metrics_subscriber.go.

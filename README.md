@@ -1,4 +1,4 @@
-# WireGuard Portal v2
+# wg-portal-2
 
 [![Build Status](https://github.com/fedor-git/wg-portal-2/actions/workflows/docker-publish.yml/badge.svg?event=push)](https://github.com/fedor-git/wg-portal-2/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://opensource.org/licenses/MIT)
@@ -6,7 +6,43 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/fedor-git/wg-portal-2)](https://goreportcard.com/report/github.com/fedor-git/wg-portal-2)
 ![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/fedor-git/wg-portal-2)
 ![GitHub code size in bytes](https://img.shields.io/github/languages/code-size/fedor-git/wg-portal-2)
-[![Docker Pulls](https://img.shields.io/docker/pulls/fedor-git/wg-portal-2.svg)](https://hub.docker.com/r/wgportal/wg-portal/)
+[![Forked from original-repo](https://img.shields.io/badge/Forked%20from-h44z%2Fwg--portal-blue?logo=github)](https://github.com/h44z/wg-portal)
+
+* Added cluster mode support. It is now possible to run multiple instances with a shared database. Synchronization is handled by the fanout module, which can be configured in the `core` fanout section
+
+```yaml
+core:
+ ...
+ manage_dns: false
+ ignore_main_default_route: true
+ delete_expired_peers: true
+ default_user_ttl: 2 # days
+
+  fanout:
+    enabled: true
+    self_url: "{{ external_url }}"
+    peers:
+      - ...
+      - ...
+    auth_header: "Authorization"
+    auth_value: "Basic ..."
+    timeout: 2s
+    debounce: 300ms
+    origin: ""
+    kick_on_start: true
+    topics: ["peers.updated", "peer.save", "peer.delete", "interface.save", "interface.updated"]
+```
+Tested with MySQL.
+
+* Added the `manage_dns` option. When set to true, this option disables the management of resolv.conf on the host and within the WireGuard container.
+
+* Added the `ignore_main_default_route` option. This option disables the management of the main route table.
+
+* Added the `delete_expired_peers` option. This enables the automatic deletion of peers once their status changes to expired.
+
+* Added the `default_user_ttl` option. This sets a default Time-To-Live (TTL) in days for peers that are provisioned via the v1 API.
+
+
 
 ## Introduction
 <!-- Text from this line # is included in docs/documentation/overview.md -->

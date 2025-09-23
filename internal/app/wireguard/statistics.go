@@ -2,19 +2,47 @@ package wireguard
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
+
+	"gorm.io/gorm"
 
 	"github.com/fedor-git/wg-portal-2/internal/app"
 	"github.com/fedor-git/wg-portal-2/internal/config"
 	"github.com/fedor-git/wg-portal-2/internal/domain"
 )
 
+func (c *StatisticsCollector) CleanOrphanPeerMetrics(ctx context.Context) {
+       dbPeers, err := c.db.GetAllPeers(ctx)
+       if err != nil {
+	       slog.Warn("failed to fetch all peers for metrics cleanup", "error", err)
+	       return
+       }
+       dbPeerIDs := make(map[domain.PeerIdentifier]struct{}, len(dbPeers))
+       for _, p := range dbPeers {
+	       dbPeerIDs[p.Identifier] = struct{}{}
+       }
+
+       c.Lock()
+       for peerID := range c.metricsLabels {
+	       if _, exists := dbPeerIDs[peerID]; !exists {
+		       slog.Info("Removing orphan metrics for peer", "peerID", peerID)
+		       c.ms.RemovePeerMetrics(&domain.Peer{Identifier: peerID})
+		       delete(c.metricsLabels, peerID)
+	       }
+       }
+       c.Unlock()
+}
+
 type StatisticsDatabaseRepo interface {
 	GetAllInterfaces(ctx context.Context) ([]domain.Interface, error)
 	GetInterfacePeers(ctx context.Context, id domain.InterfaceIdentifier) ([]domain.Peer, error)
 	GetPeer(ctx context.Context, id domain.PeerIdentifier) (*domain.Peer, error)
+	GetAllPeers(ctx context.Context) ([]domain.Peer, error)
 	UpdatePeerStatus(
 		ctx context.Context,
 		id domain.PeerIdentifier,
@@ -31,6 +59,7 @@ type StatisticsDatabaseRepo interface {
 type StatisticsMetricsServer interface {
 	UpdateInterfaceMetrics(status domain.InterfaceStatus)
 	UpdatePeerMetrics(peer *domain.Peer, status domain.PeerStatus)
+	RemovePeerMetrics(peer *domain.Peer)
 }
 
 type StatisticsEventBus interface {
@@ -57,6 +86,15 @@ type StatisticsCollector struct {
 	ms StatisticsMetricsServer
 
 	peerChangeEvent chan domain.PeerIdentifier
+
+	// Map to store metrics labels by Peer ID
+	metricsLabels map[domain.PeerIdentifier][]string
+
+	// Add a mutex to protect the metricsLabels map
+	sync.RWMutex
+
+	// Add a cache to store peer data
+	peerCache map[domain.PeerIdentifier]*domain.Peer
 }
 
 // NewStatisticsCollector creates a new statistics collector.
@@ -68,12 +106,13 @@ func NewStatisticsCollector(
 	ms StatisticsMetricsServer,
 ) (*StatisticsCollector, error) {
 	c := &StatisticsCollector{
-		cfg: cfg,
-		bus: bus,
-
-		db: db,
-		wg: wg,
-		ms: ms,
+		cfg:           cfg,
+		bus:           bus,
+		db:            db,
+		wg:            wg,
+		ms:            ms,
+		metricsLabels: make(map[domain.PeerIdentifier][]string), // Initialize the map
+		peerCache:     make(map[domain.PeerIdentifier]*domain.Peer),
 	}
 
 	c.connectToMessageBus()
@@ -84,9 +123,13 @@ func NewStatisticsCollector(
 // StartBackgroundJobs starts the background jobs for the statistics collector.
 // This method is non-blocking and returns immediately.
 func (c *StatisticsCollector) StartBackgroundJobs(ctx context.Context) {
-	c.startPingWorkers(ctx)
-	c.startInterfaceDataFetcher(ctx)
-	c.startPeerDataFetcher(ctx)
+		c.startPingWorkers(ctx)
+		c.startInterfaceDataFetcher(ctx)
+		c.startPeerDataFetcher(ctx)
+
+		go func() {
+			 <-ctx.Done()
+		}()
 }
 
 func (c *StatisticsCollector) startInterfaceDataFetcher(ctx context.Context) {
@@ -202,6 +245,22 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 
 							// Update prometheus metrics
 							go c.updatePeerMetrics(ctx, *p)
+
+							// Update the cache when peer data changes
+							convertedPeer := domain.Peer{
+								Identifier:  peer.Identifier,
+								Endpoint:   domain.ConfigOption[string]{Value: peer.Endpoint},
+							}
+
+							// Convert AllowedIPs from []domain.Cidr to []string
+							// Use the String() method of Cidr to convert to string
+							allowedIPs := make([]string, len(peer.AllowedIPs))
+							for i, cidr := range peer.AllowedIPs {
+								allowedIPs[i] = cidr.String()
+							}
+							convertedPeer.AllowedIPsStr = domain.ConfigOption[string]{Value: strings.Join(allowedIPs, ",")}
+
+							c.peerCache[peer.Identifier] = &convertedPeer
 
 							return p, nil
 						})
@@ -400,13 +459,78 @@ func (c *StatisticsCollector) updateInterfaceMetrics(status domain.InterfaceStat
 }
 
 func (c *StatisticsCollector) updatePeerMetrics(ctx context.Context, status domain.PeerStatus) {
-	// Fetch peer data from the database
-	peer, err := c.db.GetPeer(ctx, status.PeerId)
-	if err != nil {
-		slog.Warn("failed to fetch peer data for metrics", "peer", status.PeerId, "error", err)
+	// Check if peer data is in the cache
+	peer, exists := c.peerCache[status.PeerId]
+	if !exists {
+		slog.Warn("peer data not found in cache", "peer", status.PeerId)
 		return
 	}
+
+	labels := []string{
+		string(peer.InterfaceIdentifier),
+		peer.Interface.AddressStr(),
+		string(status.PeerId),
+		peer.DisplayName,
+	}
+
+	// Validate labels for empty values
+	if peer.Interface.AddressStr() == "" {
+		slog.Warn("Empty address in peer labels", "peerID", status.PeerId)
+	}
+	if peer.DisplayName == "" {
+		slog.Warn("Empty display name in peer labels", "peerID", status.PeerId)
+	}
+
+	// Lock the mutex before writing to the map
+	c.Lock()
+	defer c.Unlock()
+
+	// Store labels in the map
+	c.metricsLabels[status.PeerId] = labels
+
 	c.ms.UpdatePeerMetrics(peer, status)
+}
+
+// Update RemovePeerMetrics to handle missing peer records
+func (c *StatisticsCollector) RemovePeerMetrics(peerID domain.PeerIdentifier) error {
+	if c.ms != nil {
+		// Attempt to fetch peer from the database
+		peer, err := c.db.GetPeer(context.Background(), peerID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				slog.Warn("Peer not found in database for metrics removal", "peerID", peerID)
+
+				// Attempt to use cached labels for removal
+				c.Lock()
+				labels, exists := c.metricsLabels[peerID]
+				c.Unlock()
+				if exists {
+					slog.Debug("Removing metrics using cached labels", "peerID", peerID, "labels", labels)
+					c.ms.RemovePeerMetrics(&domain.Peer{Identifier: peerID})
+					c.Lock()
+					delete(c.metricsLabels, peerID)
+					c.Unlock()
+				} else {
+					slog.Warn("No cached labels found for peer metrics removal", "peerID", peerID)
+				}
+				return nil
+			}
+			return fmt.Errorf("failed to fetch peer for metrics removal: %w", err)
+		}
+
+
+		// Retrieve labels from the map
+		c.Lock()
+		labels, exists := c.metricsLabels[peerID]
+		if exists {
+			slog.Debug("Removing metrics for peer", "peerID", peerID, "labels", labels)
+			delete(c.metricsLabels, peerID) // Remove labels from the map
+		}
+		c.Unlock()
+
+		c.ms.RemovePeerMetrics(peer)
+	}
+	return nil
 }
 
 func (c *StatisticsCollector) connectToMessageBus() {
