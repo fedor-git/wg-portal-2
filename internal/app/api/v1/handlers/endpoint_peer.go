@@ -338,10 +338,7 @@ func (e PeerEndpoint) handleDelete() http.HandlerFunc {
 			return
 		}
 
-		e.publish(app.TopicPeerDeleted)
-		e.publish(app.TopicPeerUpdated)
-		e.publish("peer.delete", domain.PeerIdentifier(id))
-		e.publish("peers.updated", "v1:delete")
+		e.publish("peer:deleted", domain.PeerIdentifier(id))
 
 		respond.Status(w, http.StatusNoContent)
 	}

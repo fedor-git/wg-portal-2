@@ -97,7 +97,10 @@ func (m Manager) SyncAllPeersFromDB(ctx context.Context) (int, error) {
 		applied += len(desired)
 	}
 
-	return applied, nil
+	   if m.statsCollector != nil {
+		   m.statsCollector.CleanOrphanPeerMetrics(ctx)
+	   }
+	   return applied, nil
 }
 
 func (m Manager) replacePeers(ctx context.Context, iface domain.InterfaceIdentifier, peers []domain.Peer) error {

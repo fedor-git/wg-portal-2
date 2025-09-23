@@ -9,6 +9,7 @@ import (
 	"github.com/fedor-git/wg-portal-2/internal/app"
 	"github.com/fedor-git/wg-portal-2/internal/config"
 	"github.com/fedor-git/wg-portal-2/internal/domain"
+	// no need to import wireguard here; StatisticsCollector is in the same package
 )
 
 // region dependencies
@@ -54,13 +55,13 @@ type EventBus interface {
 // endregion dependencies
 
 type Manager struct {
-	cfg   *config.Config
-	bus   EventBus
-	db    InterfaceAndPeerDatabaseRepo
-	wg    *ControllerManager
-	quick WgQuickController
-
-	userLockMap *sync.Map
+	cfg            *config.Config
+	bus            EventBus
+	db             InterfaceAndPeerDatabaseRepo
+	wg             *ControllerManager
+	quick          WgQuickController
+	statsCollector *StatisticsCollector
+	userLockMap    *sync.Map
 }
 
 func NewWireGuardManager(
@@ -69,14 +70,16 @@ func NewWireGuardManager(
 	wg *ControllerManager,
 	quick WgQuickController,
 	db InterfaceAndPeerDatabaseRepo,
+	statsCollector *StatisticsCollector,
 ) (*Manager, error) {
 	m := &Manager{
-		cfg:         cfg,
-		bus:         bus,
-		wg:          wg,
-		db:          db,
-		quick:       quick,
-		userLockMap: &sync.Map{},
+		 cfg:            cfg,
+		 bus:            bus,
+		 wg:             wg,
+		 db:             db,
+		 quick:          quick,
+		 statsCollector: statsCollector,
+		 userLockMap:    &sync.Map{},
 	}
 
 	m.connectToMessageBus()

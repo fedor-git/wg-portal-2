@@ -59,7 +59,7 @@ func main() {
 
 	mailer := adapters.NewSmtpMailRepo(cfg.Mail)
 
-	metricsServer := adapters.NewMetricsServer(cfg)
+	metricsServer := adapters.NewMetricsServer(cfg, rawDb)
 
 	cfgFileSystem, err := adapters.NewFileSystemRepository(cfg.Advanced.ConfigStoragePath)
 	internal.AssertNoError(err)
@@ -95,15 +95,15 @@ func main() {
 	webAuthn, err := auth.NewWebAuthnAuthenticator(cfg, eventBus, userManager)
 	internal.AssertNoError(err)
 
-	wireGuardManager, err := wireguard.NewWireGuardManager(cfg, eventBus, wireGuard, wgQuick, database)
-	internal.AssertNoError(err)
-	wireGuardManager.StartBackgroundJobs(ctx)
-
-	fanout.Start(ctx, eventBus, cfg.Core.Fanout, wireGuardManager)
-
 	statisticsCollector, err := wireguard.NewStatisticsCollector(cfg, eventBus, database, wireGuard, metricsServer)
 	internal.AssertNoError(err)
 	statisticsCollector.StartBackgroundJobs(ctx)
+
+	wireGuardManager, err := wireguard.NewWireGuardManager(cfg, eventBus, wireGuard, wgQuick, database, statisticsCollector)
+	internal.AssertNoError(err)
+	wireGuardManager.StartBackgroundJobs(ctx)
+
+	fanout.Start(ctx, eventBus, cfg.Core.Fanout, wireGuardManager, statisticsCollector)
 
 	cfgFileManager, err := configfile.NewConfigFileManager(cfg, eventBus, database, database, cfgFileSystem)
 	internal.AssertNoError(err)
@@ -144,7 +144,7 @@ func main() {
 
 	apiV0BackendUsers := backendV0.NewUserService(cfg, userManager, wireGuardManager)
 	apiV0BackendInterfaces := backendV0.NewInterfaceService(cfg, wireGuardManager, cfgFileManager)
-	apiV0BackendPeers := backendV0.NewPeerService(cfg, wireGuardManager, cfgFileManager, mailManager)
+	apiV0BackendPeers := backendV0.NewPeerService(cfg, wireGuardManager, metricsServer, cfgFileManager, mailManager)
 
 	apiV0EndpointAuth := handlersV0.NewAuthEndpoint(cfg, apiV0Auth, apiV0Session, validatorManager, authenticator,
 		webAuthn)
@@ -175,7 +175,7 @@ func main() {
 
 	apiV1Auth := handlersV1.NewAuthenticationHandler(userManager)
 	apiV1BackendUsers := backendV1.NewUserService(cfg, userManager)
-	apiV1BackendPeers := backendV1.NewPeerService(cfg, wireGuardManager, userManager)
+	apiV1BackendPeers := backendV1.NewPeerService(cfg, wireGuardManager, userManager, metricsServer)
 
 	apiV1BackendInterfaces := backendV1.NewInterfaceService(cfg, wireGuardManager)
 	apiV1BackendProvisioning := backendV1.NewProvisioningService(cfg, userManager, wireGuardManager, cfgFileManager)
@@ -210,6 +210,9 @@ func main() {
 	go webSrv.Run(ctx, cfg.Web.ListeningAddress)
 
 	slog.Info("Application startup complete")
+
+	// Subscribe to the peer.delete topic
+	app.SubscribeToPeerDelete(eventBus, metricsServer, database)
 
 	// wait until context gets cancelled
 	<-ctx.Done()

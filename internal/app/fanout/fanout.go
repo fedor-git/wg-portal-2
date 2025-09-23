@@ -41,7 +41,7 @@ type settings struct {
 	Topics      []string
 }
 
-func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardManager *wireguard.Manager) {
+func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardManager *wireguard.Manager, collector *wireguard.StatisticsCollector) {
 	s := settings{
 		Enabled:     fc.Enabled,
 		Peers:       append([]string(nil), fc.Peers...),
@@ -96,25 +96,45 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 	}
 
 	if bus != nil {
-		for _, topic := range s.Topics {
-			t := topic
-			if err := bus.Subscribe(t, func(arg any) {
-				slog.Debug("[FANOUT] bump", "reason", "bus:"+t, "arg", arg)
-				f.bump("bus:" + t)
-				go func() {
-					sysCtx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
-					sysCtx = app.WithNoFanout(sysCtx)
-					_, err := wireGuardManager.SyncAllPeersFromDB(sysCtx)
-					if err != nil {
-						slog.Error("[FANOUT] SyncAllPeersFromDB failed", "err", err)
-					}
-				}()
-			}); err != nil {
-				slog.Warn("[FANOUT] subscribe failed", "topic", t, "err", err)
-			} else {
-				slog.Debug("[FANOUT] subscribed", "topic", t)
-			}
-		}
+		   for _, topic := range s.Topics {
+			   t := topic
+			   if t == "peer:deleted" {
+				   if err := bus.Subscribe(t, func(arg any) {
+					   slog.Debug("[FANOUT] peer:deleted event received", "arg", arg)
+					   peerID, ok := arg.(domain.PeerIdentifier)
+					   if !ok {
+						   slog.Warn("[FANOUT] peer:deleted event: arg is not PeerIdentifier", "arg", arg)
+						   return
+					   }
+					   slog.Info("[FANOUT] peer:deleted event for metrics removal", "peerID", peerID)
+					   f.bump("bus:" + t)
+				   }); err != nil {
+					   slog.Warn("[FANOUT] subscribe failed", "topic", t, "err", err)
+				   } else {
+					   slog.Debug("[FANOUT] subscribed (metrics removal)", "topic", t)
+				   }
+			   } else {
+				   if err := bus.Subscribe(t, func(arg any) {
+					   slog.Debug("[FANOUT] bump", "reason", "bus:"+t, "arg", arg)
+					   f.bump("bus:" + t)
+					   go func() {
+						   sysCtx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
+						   sysCtx = app.WithNoFanout(sysCtx)
+						   _, err := wireGuardManager.SyncAllPeersFromDB(sysCtx)
+						   if err != nil {
+							   slog.Error("[FANOUT] SyncAllPeersFromDB failed", "err", err)
+						   }
+						   if collector != nil {
+							   collector.CleanOrphanPeerMetrics(sysCtx)
+						   }
+					   }()
+				   }); err != nil {
+					   slog.Warn("[FANOUT] subscribe failed", "topic", t, "err", err)
+				   } else {
+					   slog.Debug("[FANOUT] subscribed", "topic", t)
+				   }
+			   }
+		   }
 	} else {
 		slog.Debug("[FANOUT] no bus provided, event-driven bumps disabled")
 	}
