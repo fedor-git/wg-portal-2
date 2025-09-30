@@ -146,7 +146,7 @@ func (m *MetricsServer) UpdateInterfaceMetrics(status domain.InterfaceStatus) {
 func (m *MetricsServer) UpdatePeerMetrics(peer *domain.Peer, status domain.PeerStatus) {
        labels := []string{
 	       string(peer.InterfaceIdentifier),
-	       peer.Interface.AddressStr(),
+	       peer.CheckAliveAddress(), // addresses label now contains only the ping address
 	       string(status.PeerId),
 	       peer.DisplayName,
        }

@@ -48,8 +48,15 @@ func (s *eventingPeerService) GetPeerStats(ctx context.Context, id domain.Interf
 func (s *eventingPeerService) CreatePeer(ctx context.Context, p *domain.Peer) (*domain.Peer, error) {
     out, err := s.inner.CreatePeer(ctx, p)
     if err != nil { return nil, err }
-    s.publish(app.TopicPeerCreated)
-    s.publish(app.TopicPeerUpdated)
+    
+    // Local events for statistics
+    s.publish(app.TopicPeerCreated, *out)
+    s.publish(app.TopicPeerUpdated, *out)
+    
+    // Fanout events for sync with other nodes
+    s.publish("peer.save", out)
+    s.publish("peers.updated", "v0:create")
+    
     return out, nil
 }
 
@@ -68,14 +75,28 @@ func (s *eventingPeerService) CreateMultiplePeers(ctx context.Context, ifaceID d
 func (s *eventingPeerService) UpdatePeer(ctx context.Context, p *domain.Peer) (*domain.Peer, error) {
     out, err := s.inner.UpdatePeer(ctx, p)
     if err != nil { return nil, err }
-    s.publish(app.TopicPeerUpdated)
+    
+    // Local events for statistics
+    s.publish(app.TopicPeerUpdated, *out)
+    
+    // Fanout events for sync with other nodes
+    s.publish("peer.save", out)
+    s.publish("peers.updated", "v0:update")
+    
     return out, nil
 }
 
 func (s *eventingPeerService) DeletePeer(ctx context.Context, id domain.PeerIdentifier) error {
     if err := s.inner.DeletePeer(ctx, id); err != nil { return err }
-    s.publish(app.TopicPeerDeleted)
-    s.publish(app.TopicPeerUpdated)
+    
+    // Local events for statistics
+    s.publish(app.TopicPeerDeleted, id)
+    s.publish(app.TopicPeerUpdated, id)
+    
+    // Fanout events for sync with other nodes
+    s.publish("peer.delete", id)
+    s.publish("peers.updated", "v0:delete")
+    
     return nil
 }
 
