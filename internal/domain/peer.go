@@ -148,6 +148,14 @@ func (p *Peer) OverwriteUserEditableFields(userPeer *Peer, cfg *config.Config) {
 	p.DisabledReason = userPeer.DisabledReason
 }
 
+func (p *Peer) Equals(other Peer) bool {
+	return p.Identifier == other.Identifier &&
+		p.AllowedIPsStr.Value == other.AllowedIPsStr.Value &&
+		p.Endpoint.Value == other.Endpoint.Value &&
+		p.PresharedKey == other.PresharedKey &&
+		p.PersistentKeepalive == other.PersistentKeepalive
+}
+
 type PeerInterfaceConfig struct {
 	KeyPair // private/public Key of the peer
 

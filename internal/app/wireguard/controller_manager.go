@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"maps"
 	"slices"
+	"strings"
 
 	"github.com/fedor-git/wg-portal-2/internal/adapters/wgcontroller"
 	"github.com/fedor-git/wg-portal-2/internal/config"
@@ -166,4 +167,80 @@ func (c *ControllerManager) GetControllerNames() []config.BackendBase {
 	}
 
 	return names
+}
+
+func (c *ControllerManager) ListPeers(ctx context.Context, iface string) ([]domain.Peer, error) {
+	controller, exists := c.controllers[domain.InterfaceBackend(iface)]
+	if !exists {
+		return nil, fmt.Errorf("interface controller not found for iface: %s", iface)
+	}
+
+	peers, err := controller.Implementation.GetPeers(ctx, domain.InterfaceIdentifier(iface))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list peers for iface %s: %w", iface, err)
+	}
+
+	result := make([]domain.Peer, len(peers))
+	for i, p := range peers {
+		allowedIPs := make([]string, len(p.AllowedIPs))
+		for j, ip := range p.AllowedIPs {
+			allowedIPs[j] = ip.String()
+		}
+
+		result[i] = domain.Peer{
+			Identifier:    p.Identifier,
+			AllowedIPsStr: domain.ConfigOption[string]{Value: strings.Join(allowedIPs, ",")},
+			Endpoint:      domain.ConfigOption[string]{Value: p.Endpoint},
+		}
+	}
+
+	return result, nil
+}
+
+func (c *ControllerManager) RemovePeer(ctx context.Context, iface string, peerID string) error {
+	controller, exists := c.controllers[domain.InterfaceBackend(iface)]
+	if !exists {
+		return fmt.Errorf("interface controller not found for iface: %s", iface)
+	}
+
+	err := controller.Implementation.DeletePeer(ctx, domain.InterfaceIdentifier(iface), domain.PeerIdentifier(peerID))
+	if err != nil {
+		return fmt.Errorf("failed to remove peer %s from iface %s: %w", peerID, iface, err)
+	}
+
+	return nil
+}
+
+func (c *ControllerManager) SavePeer(ctx context.Context, iface string, peer *domain.Peer) error {
+	controller, exists := c.controllers[domain.InterfaceBackend(iface)]
+	if !exists {
+		return fmt.Errorf("interface controller not found for iface: %s", iface)
+	}
+
+	updateFunc := func(pp *domain.PhysicalPeer) (*domain.PhysicalPeer, error) {
+		pp.Identifier = peer.Identifier
+		pp.Endpoint = peer.Endpoint.Value
+		pp.AllowedIPs = parseAllowedIPs(peer.AllowedIPsStr.Value)
+		pp.PresharedKey = peer.PresharedKey
+		pp.PersistentKeepalive = peer.PersistentKeepalive.Value
+		return pp, nil
+	}
+
+	if err := controller.Implementation.SavePeer(ctx, domain.InterfaceIdentifier(iface), peer.Identifier, updateFunc); err != nil {
+		return fmt.Errorf("failed to save peer %s on iface %s: %w", peer.Identifier, iface, err)
+	}
+
+	return nil
+}
+
+func parseAllowedIPs(allowedIPsStr string) []domain.Cidr {
+	ips := strings.Split(allowedIPsStr, ",")
+	result := make([]domain.Cidr, 0, len(ips))
+	for _, ip := range ips {
+		cidr, err := domain.CidrFromString(ip)
+		if err == nil {
+			result = append(result, cidr)
+		}
+	}
+	return result
 }

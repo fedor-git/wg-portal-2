@@ -95,75 +95,23 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 		debounce: newDebouncer(s.Debounce),
 	}
 	if bus != nil {
-		// Subscribe to additional events for instant metrics creation
-		for _, t := range []string{"peer.save", "peers.updated"} {
+		for _, topic := range s.Topics {
+			t := topic
 			if err := bus.Subscribe(t, func(arg any) {
-				slog.Debug("[FANOUT] instant metrics (sync all)", "reason", "bus:"+t, "arg", arg)
-				if collector != nil {
-					sysCtx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
-					collector.EnsurePeerMetrics(sysCtx)
-					slog.Debug("[FANOUT] EnsurePeerMetrics called after event", "event", t)
-				}
+				slog.Debug("[FANOUT] bump", "reason", "bus:"+t, "arg", arg)
 				f.bump("bus:" + t)
+				go func() {
+					sysCtx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
+					sysCtx = app.WithNoFanout(sysCtx)
+					_, err := wireGuardManager.SyncAllPeersFromDB(sysCtx)
+					if err != nil {
+						slog.Error("[FANOUT] SyncAllPeersFromDB failed", "err", err)
+					}
+				}()
 			}); err != nil {
 				slog.Warn("[FANOUT] subscribe failed", "topic", t, "err", err)
 			} else {
-				slog.Debug("[FANOUT] subscribed (instant metrics)", "topic", t)
-			}
-		}
-		for _, topic := range s.Topics {
-			t := topic
-			if t == "peer:deleted" {
-				if err := bus.Subscribe(t, func(arg any) {
-					slog.Debug("[FANOUT] peer:deleted event received", "arg", arg)
-					peerID, ok := arg.(domain.PeerIdentifier)
-					if !ok {
-						slog.Warn("[FANOUT] peer:deleted event: arg is not PeerIdentifier", "arg", arg)
-						return
-					}
-					slog.Info("[FANOUT] peer:deleted event for metrics removal", "peerID", peerID)
-					f.bump("bus:" + t)
-				}); err != nil {
-					slog.Warn("[FANOUT] subscribe failed", "topic", t, "err", err)
-				} else {
-					slog.Debug("[FANOUT] subscribed (metrics removal)", "topic", t)
-				}
-			} else if t == "peer:created" || t == "peer:updated" {
-				if err := bus.Subscribe(t, func(arg any) {
-					slog.Debug("[FANOUT] instant metrics (sync all)", "reason", "bus:"+t, "arg", arg)
-					if collector != nil {
-						sysCtx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
-						collector.EnsurePeerMetrics(sysCtx)
-						slog.Debug("[FANOUT] EnsurePeerMetrics called after event", "event", t)
-					}
-					f.bump("bus:" + t)
-				}); err != nil {
-					slog.Warn("[FANOUT] subscribe failed", "topic", t, "err", err)
-				} else {
-					slog.Debug("[FANOUT] subscribed (instant metrics)", "topic", t)
-				}
-			} else {
-				if err := bus.Subscribe(t, func(arg any) {
-					slog.Debug("[FANOUT] bump", "reason", "bus:"+t, "arg", arg)
-					f.bump("bus:" + t)
-					go func() {
-						sysCtx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
-						sysCtx = app.WithNoFanout(sysCtx)
-						_, err := wireGuardManager.SyncAllPeersFromDB(sysCtx)
-						if err != nil {
-							slog.Error("[FANOUT] SyncAllPeersFromDB failed", "err", err)
-						}
-						if collector != nil {
-							collector.EnsurePeerMetrics(sysCtx)
-							slog.Debug("[FANOUT] EnsurePeerMetrics called after SyncAllPeersFromDB", "event", t)
-							collector.CleanOrphanPeerMetrics(sysCtx)
-						}
-					}()
-				}); err != nil {
-					slog.Warn("[FANOUT] subscribe failed", "topic", t, "err", err)
-				} else {
-					slog.Debug("[FANOUT] subscribed", "topic", t)
-				}
+				slog.Debug("[FANOUT] subscribed", "topic", t)
 			}
 		}
 	} else {

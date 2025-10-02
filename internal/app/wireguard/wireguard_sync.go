@@ -34,73 +34,55 @@ func (m Manager) SyncAllPeersFromDB(ctx context.Context) (int, error) {
 
 	applied := 0
 	for _, in := range ifaces {
-		if err := m.RestoreInterfaceState(ctx, true, in.Identifier); err != nil {
-			slog.ErrorContext(ctx, "restore interface state failed", "iface", in.Identifier, "err", err)
-			continue
-		}
-
 		peers, err := m.db.GetInterfacePeers(ctx, in.Identifier)
 		if err != nil {
 			slog.ErrorContext(ctx, "peer sync: failed to load peers", "iface", in.Identifier, "err", err)
 			continue
 		}
 
-		slog.Debug("SyncAllPeersFromDB: loaded peers from DB", "iface", in.Identifier, "count", len(peers), "peers", peers)
-
-		if len(peers) == 0 {
-			if err := m.wg.ClearPeers(ctx, string(in.Identifier)); err != nil {
-				slog.ErrorContext(ctx, "clear peers failed", "iface", in.Identifier, "err", err)
-			} else {
-				if m.bus != nil {
-					m.bus.Publish(app.TopicPeerInterfaceUpdated, in.Identifier)
-				}
-				if !app.NoFanout(ctx) && m.bus != nil {
-					m.bus.Publish("peers.updated", "sync:clear")
-				}
-			}
+		existingPeers, err := m.wg.ListPeers(ctx, string(in.Identifier))
+		if err != nil {
+			slog.ErrorContext(ctx, "failed to list existing peers", "iface", in.Identifier, "err", err)
 			continue
 		}
 
-		desired := make([]domain.Peer, 0, len(peers))
-		for i := range peers {
-			if !peers[i].IsDisabled() {
-				desired = append(desired, peers[i])
-			} else {
-				slog.Debug("SyncAllPeersFromDB: peer is disabled, skipping", "peer", peers[i])
+		existingPeerMap := make(map[string]domain.Peer)
+		for _, p := range existingPeers {
+			existingPeerMap[string(p.Identifier)] = p
+		}
+
+		newPeerMap := make(map[string]domain.Peer)
+		for _, p := range peers {
+			if !p.IsDisabled() {
+				newPeerMap[string(p.Identifier)] = p
 			}
 		}
 
-		if err := m.replacePeers(ctx, in.Identifier, desired); err != nil {
-			if isNoSuchFile(err) {
-				slog.WarnContext(ctx, "replacePeers failed (no iface/file), restoring and retrying",
-					"iface", in.Identifier, "err", err)
-
-				if rErr := m.RestoreInterfaceState(ctx, true, in.Identifier); rErr != nil {
-					slog.ErrorContext(ctx, "retry restore interface failed", "iface", in.Identifier, "err", rErr)
-					continue
+		// Remove peers that are no longer in the database
+		for id := range existingPeerMap {
+			if _, exists := newPeerMap[id]; !exists {
+				if err := m.wg.RemovePeer(ctx, string(in.Identifier), id); err != nil {
+					slog.ErrorContext(ctx, "failed to remove peer", "peer", id, "iface", in.Identifier, "err", err)
 				}
-				if r2 := m.replacePeers(ctx, in.Identifier, desired); r2 != nil {
-					slog.ErrorContext(ctx, "replacePeers retry failed", "iface", in.Identifier, "err", r2)
-					continue
-				}
-			} else {
-				slog.ErrorContext(ctx, "replacePeers failed", "iface", in.Identifier, "err", err)
-				continue
 			}
 		}
 
-		if !app.NoFanout(ctx) && m.bus != nil {
-			m.bus.Publish("peers.updated", "sync")
+		// Add or update peers
+		for id, peer := range newPeerMap {
+			if existingPeer, exists := existingPeerMap[id]; !exists || !existingPeer.Equals(peer) {
+				if err := m.wg.SavePeer(ctx, string(in.Identifier), &peer); err != nil {
+					slog.ErrorContext(ctx, "failed to save peer", "peer", id, "iface", in.Identifier, "err", err)
+					continue
+				}
+				applied++
+			}
 		}
-
-		slog.Debug("SyncAllPeersFromDB called", "ctx", ctx)
-		applied += len(desired)
 	}
 
-	   if m.statsCollector != nil {
-		   m.statsCollector.CleanOrphanPeerMetrics(ctx)
-	   }
-	   return applied, nil
+	// if m.statsCollector != nil {
+	// 	m.statsCollector.CleanOrphanPeerMetrics(ctx)
+	// }
+	return applied, nil
 }
 
 func (m Manager) replacePeers(ctx context.Context, iface domain.InterfaceIdentifier, peers []domain.Peer) error {
