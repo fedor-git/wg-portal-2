@@ -221,13 +221,7 @@ func (e ProvisioningEndpoint) handleNewPeerPost() http.HandlerFunc {
 			return
 		}
 		if existingPeer != nil {
-			respond.JSON(w, http.StatusOK, struct {
-				Status string        `json:"status"`
-				Peer   models.Peer   `json:"peer"`
-			}{
-				Status: "existing",
-				Peer:   *models.NewPeer(existingPeer),
-			})
+			respond.JSON(w, http.StatusOK, models.NewPeer(existingPeer))
 			return
 		}
 
