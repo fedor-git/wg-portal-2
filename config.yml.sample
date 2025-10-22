@@ -8,6 +8,8 @@ core:
   admin_password: secret
   create_default_peer: true
   create_default_peer_on_creation: false
+  default_user_ttl: "24h"  # TTL for peers: 1h, 24h, 2d, 7d, etc.
+  delete_expired_peers: true  # true = delete, false = disable expired peers
 
 web:
   external_url: http://localhost:8888

@@ -43,6 +43,11 @@ function apiRequest(method) {
         if (body) {
             requestOptions.headers['Content-Type'] = 'application/json';
             requestOptions.body = JSON.stringify(body);
+            
+            // Debug logging for ExpiresAt field
+            if (body.ExpiresAt) {
+                console.log("Sending ExpiresAt in body:", body.ExpiresAt, "JSON stringified:", requestOptions.body.includes(body.ExpiresAt))
+            }
         }
         return fetch(url, requestOptions).then(handleResponse);
     }

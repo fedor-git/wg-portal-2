@@ -13,12 +13,44 @@ type ExpiryDate struct {
 	*time.Time
 }
 
-// UnmarshalJSON will unmarshal using 2006-01-02 layout
+// UnmarshalJSON will unmarshal using RFC3339 format with fallback to legacy date format
 func (d *ExpiryDate) UnmarshalJSON(b []byte) error {
 	if len(b) == 0 || string(b) == "null" || string(b) == "\"\"" {
 		return nil
 	}
-	parsed, err := time.Parse(ExpiryDateTimeLayout, string(b))
+
+	timeStr := string(b)
+	
+	// Remove outer quotes and any extra quotes from JSON serialization
+	if len(timeStr) >= 2 && timeStr[0] == '"' && timeStr[len(timeStr)-1] == '"' {
+		timeStr = timeStr[1 : len(timeStr)-1]
+	}
+	
+	// Handle double-quoted strings from frontend reactive proxies
+	if len(timeStr) >= 2 && timeStr[0] == '"' && timeStr[len(timeStr)-1] == '"' {
+		timeStr = timeStr[1 : len(timeStr)-1]
+	}
+
+	// Try RFC3339 format first (preferred)
+	if t, err := time.Parse("2006-01-02T15:04:05Z", timeStr); err == nil {
+		d.Time = &t
+		return nil
+	}
+
+	// Try RFC3339 with milliseconds
+	if t, err := time.Parse("2006-01-02T15:04:05.000Z", timeStr); err == nil {
+		d.Time = &t
+		return nil
+	}
+
+	// Try RFC3339 with timezone
+	if t, err := time.Parse(time.RFC3339, timeStr); err == nil {
+		d.Time = &t
+		return nil
+	}
+
+	// Fallback to legacy date format for backward compatibility
+	parsed, err := time.Parse("2006-01-02", timeStr)
 	if err != nil {
 		return err
 	}
@@ -29,13 +61,14 @@ func (d *ExpiryDate) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// MarshalJSON will marshal using 2006-01-02 layout
+// MarshalJSON will marshal using RFC3339 layout
 func (d *ExpiryDate) MarshalJSON() ([]byte, error) {
 	if d == nil || d.Time == nil {
 		return []byte("null"), nil
 	}
 
-	s := d.Format(ExpiryDateTimeLayout)
+	// Use RFC3339 format for output
+	s := "\"" + d.Format(time.RFC3339) + "\""
 	return []byte(s), nil
 }
 

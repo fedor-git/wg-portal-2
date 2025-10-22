@@ -207,10 +207,14 @@ func (e ProvisioningEndpoint) handleNewPeerPost() http.HandlerFunc {
 
 		// Set default Expiry date if not provided
 		if req.ExpiresAt == "" {
-			ttl := e.provisioning.GetConfig().Core.DefaultUserTTL
-			currentDate := time.Now()
-			expiryDate := currentDate.AddDate(0, 0, ttl) // Add TTL days to the current date
-			req.ExpiresAt = expiryDate.Format(models.ExpiryDateTimeLayout)
+			ttlStr := e.provisioning.GetConfig().Core.DefaultUserTTL
+			if ttlStr != "" {
+				if ttlDuration, err := config.ParseDurationWithDays(ttlStr); err == nil {
+					currentDate := time.Now()
+					expiryDate := currentDate.Add(ttlDuration)
+					req.ExpiresAt = expiryDate.Format(time.RFC3339)
+				}
+			}
 		}
 
 		// Check for existing peer with the same DisplayName and UserIdentifier

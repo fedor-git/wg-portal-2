@@ -91,6 +91,7 @@ func NewWireGuardManager(
 // This method is non-blocking.
 func (m Manager) StartBackgroundJobs(ctx context.Context) {
 	go m.runExpiredPeersCheck(ctx)
+	go m.initializePeerTTL(ctx)
 }
 
 func (m Manager) connectToMessageBus() {
@@ -98,6 +99,7 @@ func (m Manager) connectToMessageBus() {
 	_ = m.bus.Subscribe(app.TopicAuthLogin, m.handleUserLoginEvent)
 	_ = m.bus.Subscribe(app.TopicUserDisabled, m.handleUserDisabledEvent)
 	_ = m.bus.Subscribe(app.TopicUserEnabled, m.handleUserEnabledEvent)
+	_ = m.bus.Subscribe(app.TopicPeerStateChanged, m.handlePeerStateChangeEvent)
 	_ = m.bus.Subscribe(app.TopicUserDeleted, m.handleUserDeletedEvent)
 }
 
@@ -341,4 +343,98 @@ func (m Manager) checkExpiredPeers(ctx context.Context, peers []domain.Peer) {
 
 func (m Manager) ClearPeers(ctx context.Context, iface domain.InterfaceIdentifier) error {
     return m.clearPeers(ctx, iface)
+}
+
+// handlePeerStateChangeEvent handles peer connection state changes and updates TTL accordingly
+func (m Manager) handlePeerStateChangeEvent(peerStatus domain.PeerStatus, peer domain.Peer) {
+	ctx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
+	
+	slog.Debug("peer state change event received", "peer", peer.Identifier, "connected", peerStatus.IsConnected)
+	
+	// Parse the default user TTL from config
+	ttlDuration, err := config.ParseDurationWithDays(m.cfg.Core.DefaultUserTTL)
+	if err != nil {
+		slog.Error("failed to parse default user TTL", "error", err)
+		return
+	}
+	
+	// Update peer TTL based on connection state
+	var newExpiresAt *time.Time
+	if peerStatus.IsConnected {
+		// Peer connected - extend TTL from now
+		expiryTime := time.Now().Add(ttlDuration)
+		newExpiresAt = &expiryTime
+		slog.Info("peer connected, extending TTL", "peer", peer.Identifier, "new_expires_at", expiryTime.Format(time.RFC3339))
+	} else {
+		// Peer disconnected - set TTL to expire after the duration from now
+		expiryTime := time.Now().Add(ttlDuration)
+		newExpiresAt = &expiryTime
+		slog.Info("peer disconnected, setting expiration TTL", "peer", peer.Identifier, "expires_at", expiryTime.Format(time.RFC3339))
+	}
+	
+	// Update the peer in database
+	updatedPeer := peer
+	updatedPeer.ExpiresAt = newExpiresAt
+	
+	_, err = m.UpdatePeer(ctx, &updatedPeer)
+	if err != nil {
+		slog.Error("failed to update peer TTL", "peer", peer.Identifier, "error", err)
+	}
+}
+
+// initializePeerTTL initializes TTL for peers based on their current connection state
+func (m Manager) initializePeerTTL(ctx context.Context) {
+	ctx = domain.SetUserInfo(ctx, domain.SystemAdminContextUserInfo())
+	slog.Debug("initializing peer TTL based on connection states")
+	
+	// Parse the default user TTL from config
+	ttlDuration, err := config.ParseDurationWithDays(m.cfg.Core.DefaultUserTTL)
+	if err != nil {
+		slog.Error("failed to parse default user TTL during initialization", "error", err)
+		return
+	}
+	
+	// Get all interfaces
+	interfaces, err := m.db.GetAllInterfaces(ctx)
+	if err != nil {
+		slog.Error("failed to get all interfaces for TTL initialization", "error", err)
+		return
+	}
+	
+	// Process peers from all interfaces
+	for _, iface := range interfaces {
+		_, peers, err := m.db.GetInterfaceAndPeers(ctx, iface.Identifier)
+		if err != nil {
+			slog.Error("failed to get peers for interface", "interface", iface.Identifier, "error", err)
+			continue
+		}
+		
+		for _, peer := range peers {
+			if peer.IsDisabled() {
+				continue // skip disabled peers
+			}
+			
+			// Get peer status to check connection state
+			peerStats, err := m.db.GetPeersStats(ctx, peer.Identifier)
+			if err != nil || len(peerStats) == 0 {
+				continue
+			}
+			
+			peerStatus := peerStats[0]
+			
+			// Only update TTL for disconnected peers without expiration or with expired TTL
+			if !peerStatus.IsConnected && (peer.ExpiresAt == nil || peer.IsExpired()) {
+				expiryTime := time.Now().Add(ttlDuration)
+				updatedPeer := peer
+				updatedPeer.ExpiresAt = &expiryTime
+				
+				_, err = m.UpdatePeer(ctx, &updatedPeer)
+				if err != nil {
+					slog.Error("failed to initialize peer TTL", "peer", peer.Identifier, "error", err)
+				} else {
+					slog.Info("initialized TTL for disconnected peer", "peer", peer.Identifier, "expires_at", expiryTime.Format(time.RFC3339))
+				}
+			}
+		}
+	}
 }

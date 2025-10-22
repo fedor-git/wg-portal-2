@@ -569,7 +569,9 @@
         "label": "Ignore global settings"
       },
       "expires-at": {
-        "label": "Expiry date"
+        "label": "Expiry date & time",
+        "date-placeholder": "Date",
+        "time-placeholder": "Time"
       }
     },
     "peer-multi-create": {

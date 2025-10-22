@@ -6,6 +6,7 @@ import { useI18n } from 'vue-i18n';
 import { notify } from "@kyvg/vue3-notification";
 import { freshPeer, freshInterface } from '@/helpers/models';
 import { profileStore } from "@/stores/profile";
+import { formatRFC3339ToDatetime, formatDateTimeToRFC3339 } from '@/helpers/datetime';
 
 const { t } = useI18n()
 
@@ -58,6 +59,10 @@ const formData = ref(freshPeer())
 const isSaving = ref(false)
 const isDeleting = ref(false)
 
+// Separate date and time fields for better UX
+const expiryDate = ref("")
+const expiryTime = ref("")
+
 // functions
 
 watch(() => props.visible, async (newValue, oldValue) => {
@@ -70,7 +75,12 @@ watch(() => props.visible, async (newValue, oldValue) => {
       formData.value.UserIdentifier = peers.Prepared.UserIdentifier
       formData.value.InterfaceIdentifier = peers.Prepared.InterfaceIdentifier
       formData.value.Disabled = peers.Prepared.Disabled
-      formData.value.ExpiresAt = peers.Prepared.ExpiresAt
+      
+      // Convert RFC3339 to separate date and time fields
+      const datetime = formatRFC3339ToDatetime(peers.Prepared.ExpiresAt)
+      expiryDate.value = datetime.date
+      expiryTime.value = datetime.time
+      
       formData.value.Notes = peers.Prepared.Notes
 
       formData.value.Endpoint = peers.Prepared.Endpoint
@@ -104,7 +114,12 @@ watch(() => props.visible, async (newValue, oldValue) => {
       formData.value.UserIdentifier = selectedPeer.value.UserIdentifier
       formData.value.InterfaceIdentifier = selectedPeer.value.InterfaceIdentifier
       formData.value.Disabled = selectedPeer.value.Disabled
-      formData.value.ExpiresAt = selectedPeer.value.ExpiresAt
+      
+      // Convert RFC3339 to separate date and time fields
+      const datetime = formatRFC3339ToDatetime(selectedPeer.value.ExpiresAt)
+      expiryDate.value = datetime.date
+      expiryTime.value = datetime.time
+      
       formData.value.Notes = selectedPeer.value.Notes
 
       formData.value.Endpoint = selectedPeer.value.Endpoint
@@ -153,14 +168,17 @@ watch(() => props.visible, async (newValue, oldValue) => {
 )
 
 watch(() => formData.value.Disabled, async (newValue, oldValue) => {
-  if (oldValue && !newValue && formData.value.ExpiresAt) {
-    formData.value.ExpiresAt = "" // reset expiry date
+  if (oldValue && !newValue && (expiryDate.value || expiryTime.value)) {
+    expiryDate.value = "" // reset expiry date
+    expiryTime.value = "" // reset expiry time
   }
 }
 )
 
 function close() {
   formData.value = freshPeer()
+  expiryDate.value = ""
+  expiryTime.value = ""
   emit('close')
 }
 
@@ -168,6 +186,12 @@ async function save() {
   if (isSaving.value) return
   isSaving.value = true
   try {
+    // Convert separate date and time fields back to RFC3339 format
+    const expiresAtValue = formatDateTimeToRFC3339(expiryDate.value, expiryTime.value)
+    
+    // Ensure it's a plain string (not reactive)
+    formData.value.ExpiresAt = expiresAtValue ? String(expiresAtValue) : ""
+    
     if (props.peerId !== '#NEW#') {
       await peers.UpdatePeer(selectedPeer.value.Identifier, formData.value)
     } else {
@@ -283,8 +307,16 @@ async function del() {
           </div>
           <div class="form-group col-md-6">
             <label class="form-label">{{ $t('modals.peer-edit.expires-at.label') }}</label>
-            <input type="date" pattern="\d{4}-\d{2}-\d{2}" class="form-control" min="2023-01-01"
-              v-model="formData.ExpiresAt">
+            <div class="row">
+              <div class="col-8">
+                <input type="date" pattern="\d{4}-\d{2}-\d{2}" class="form-control" min="2023-01-01"
+                  v-model="expiryDate" :placeholder="$t('modals.peer-edit.expires-at.date-placeholder')">
+              </div>
+              <div class="col-4">
+                <input type="time" class="form-control"
+                  v-model="expiryTime" :placeholder="$t('modals.peer-edit.expires-at.time-placeholder')">
+              </div>
+            </div>
           </div>
         </div>
       </fieldset>

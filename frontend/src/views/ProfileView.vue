@@ -6,9 +6,12 @@ import { profileStore } from "@/stores/profile";
 import UserPeerEditModal from "@/components/UserPeerEditModal.vue";
 import { settingsStore } from "@/stores/settings";
 import { humanFileSize } from "@/helpers/utils";
+import { formatRFC3339ToDatetime } from '@/helpers/datetime';
+import { useI18n } from 'vue-i18n';
 
 const settings = settingsStore()
 const profile = profileStore()
+const { t } = useI18n()
 
 const viewedPeerId = ref("")
 const editPeerId = ref("")
@@ -33,6 +36,20 @@ function friendlyInterfaceName(id, name) {
     return name
   }
   return id
+}
+
+function formatExpiryTooltip(expiresAt) {
+  if (!expiresAt) return ""
+  
+  try {
+    const datetime = formatRFC3339ToDatetime(expiresAt)
+    if (datetime.date && datetime.time) {
+      return `${datetime.date} ${datetime.time}`
+    }
+    return expiresAt
+  } catch (e) {
+    return expiresAt
+  }
 }
 
 function toggleSelectAll() {
@@ -124,7 +141,7 @@ onMounted(async () => {
             <span v-if="peer.Disabled" class="text-danger"><i class="fa fa-circle-xmark"
                 :title="peer.DisabledReason"></i></span>
             <span v-if="!peer.Disabled && peer.ExpiresAt" class="text-warning"><i class="fas fa-hourglass-end"
-                :title="peer.ExpiresAt"></i></span>
+                :title="formatExpiryTooltip(peer.ExpiresAt)"></i></span>
           </td>
           <td><span v-if="peer.DisplayName" :title="peer.Identifier">{{ peer.DisplayName }}</span><span v-else
               :title="peer.Identifier">{{ $filters.truncate(peer.Identifier, 10) }}</span></td>

@@ -73,6 +73,6 @@ type ProvisioningRequest struct {
 	PublicKey string `json:"PublicKey" example:"xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=" binding:"omitempty,len=44"`
 	// PresharedKey is the optional pre-shared key of the peer. If no pre-shared key is set, a new key is generated.
 	PresharedKey string `json:"PresharedKey" example:"yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=" binding:"omitempty,len=44"`
-	// ExpiresAt defines the expiration date of the user in RFC3339 format.
-	ExpiresAt string `json:"ExpiresAt" example:"2025-09-18" binding:"omitempty,datetime=2006-01-02"`
+	// ExpiresAt defines the expiration date and time of the user in RFC3339 format.
+	ExpiresAt string `json:"ExpiresAt" example:"2025-09-18T15:04:05Z" binding:"omitempty,datetime=2006-01-02T15:04:05Z07:00"`
 }

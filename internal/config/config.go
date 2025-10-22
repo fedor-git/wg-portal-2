@@ -46,7 +46,7 @@ type Config struct {
 
 		Fanout                       FanoutConfig `yaml:"fanout"`
 		DeleteExpiredPeers           bool          `yaml:"delete_expired_peers"` // Option to delete expired peers instead of disabling them.
-		DefaultUserTTL               int           `yaml:"default_user_ttl"` // Default TTL (in days) for new users.
+		DefaultUserTTL               string        `yaml:"default_user_ttl"` // Default TTL (e.g., "24h", "7d", "30d") for new users.
 	} `yaml:"core"`
 
 	Advanced struct {
@@ -149,7 +149,7 @@ func defaultConfig() *Config {
 
 	cfg.Core.ManageDns = true
 	cfg.Core.IgnoreMainDefaultRoute = false
-	cfg.Core.DefaultUserTTL = 0
+	cfg.Core.DefaultUserTTL = "30d" // Default to 30 days
 
 	cfg.Database = DatabaseConfig{
 		Type: "sqlite",
