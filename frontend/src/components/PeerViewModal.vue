@@ -11,6 +11,7 @@ import { settingsStore } from "@/stores/settings";
 import { profileStore } from "@/stores/profile";
 import { base64_url_encode } from '@/helpers/encoding';
 import { apiWrapper } from "@/helpers/fetch-wrapper";
+import { formatRFC3339ToDatetime } from '@/helpers/datetime';
 
 const { t } = useI18n()
 
@@ -43,6 +44,20 @@ const selectedPeer = computed(() => {
     }
   }
   return p
+})
+
+const formattedExpiryDate = computed(() => {
+  if (!selectedPeer.value.ExpiresAt) return ""
+  
+  try {
+    const datetime = formatRFC3339ToDatetime(selectedPeer.value.ExpiresAt)
+    if (datetime.date && datetime.time) {
+      return `${datetime.date} ${datetime.time}`
+    }
+    return selectedPeer.value.ExpiresAt // fallback to original format
+  } catch (e) {
+    return selectedPeer.value.ExpiresAt // fallback to original format
+  }
 })
 
 const selectedStats = computed(() => {
@@ -159,7 +174,7 @@ function ConfigQrUrl() {
                     <li>{{ $t('modals.peer-view.user') }}: {{ selectedPeer.UserIdentifier }}</li>
                     <li v-if="selectedPeer.Notes">{{ $t('modals.peer-view.notes') }}: {{ selectedPeer.Notes }}</li>
                     <li v-if="selectedPeer.ExpiresAt">{{ $t('modals.peer-view.expiry-status') }}: {{
-                      selectedPeer.ExpiresAt }}</li>
+                      formattedExpiryDate }}</li>
                     <li v-if="selectedPeer.Disabled">{{ $t('modals.peer-view.disabled-status') }}: {{
                       selectedPeer.DisabledReason }}</li>
                   </ul>

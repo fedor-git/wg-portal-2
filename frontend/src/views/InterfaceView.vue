@@ -12,6 +12,7 @@ import {notify} from "@kyvg/vue3-notification";
 import {settingsStore} from "@/stores/settings";
 import {humanFileSize} from '@/helpers/utils';
 import {useI18n} from "vue-i18n";
+import { formatRFC3339ToDatetime } from '@/helpers/datetime';
 
 const settings = settingsStore()
 const interfaces = interfaceStore()
@@ -38,6 +39,20 @@ function sortBy(key) {
   }
   peers.sortKey = sortKey.value;
   peers.sortOrder = sortOrder.value;
+}
+
+function formatExpiryTooltip(expiresAt) {
+  if (!expiresAt) return ""
+  
+  try {
+    const datetime = formatRFC3339ToDatetime(expiresAt)
+    if (datetime.date && datetime.time) {
+      return `${t('interfaces.peer-expiring')} ${datetime.date} ${datetime.time}`
+    }
+    return `${t('interfaces.peer-expiring')} ${expiresAt}`
+  } catch (e) {
+    return `${t('interfaces.peer-expiring')} ${expiresAt}`
+  }
 }
 
 function calculateInterfaceName(id, name) {
@@ -397,7 +412,7 @@ onMounted(async () => {
           </th>
           <td class="text-center">
             <span v-if="peer.Disabled" class="text-danger" :title="$t('interfaces.peer-disabled') + ' ' + peer.DisabledReason"><i class="fa fa-circle-xmark"></i></span>
-            <span v-if="!peer.Disabled && peer.ExpiresAt" class="text-warning" :title="$t('interfaces.peer-expiring') + ' ' +  peer.ExpiresAt"><i class="fas fa-hourglass-end expiring-peer"></i></span>
+            <span v-if="!peer.Disabled && peer.ExpiresAt" class="text-warning" :title="formatExpiryTooltip(peer.ExpiresAt)"><i class="fas fa-hourglass-end expiring-peer"></i></span>
           </td>
           <td><span v-if="peer.DisplayName" :title="peer.Identifier">{{peer.DisplayName}}</span><span v-else :title="peer.Identifier">{{ $filters.truncate(peer.Identifier, 10)}}</span></td>
           <td>{{peer.UserIdentifier}}</td>

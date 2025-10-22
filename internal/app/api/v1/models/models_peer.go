@@ -1,13 +1,12 @@
 package models
 
 import (
+	"strings"
 	"time"
 
 	"github.com/fedor-git/wg-portal-2/internal"
 	"github.com/fedor-git/wg-portal-2/internal/domain"
 )
-
-const ExpiryDateTimeLayout = "2006-01-02"
 
 // Peer represents a WireGuard peer entry.
 type Peer struct {
@@ -23,8 +22,8 @@ type Peer struct {
 	Disabled bool `json:"Disabled" example:"false"`
 	// DisabledReason is the reason why the peer has been disabled.
 	DisabledReason string `json:"DisabledReason" binding:"required_if=Disabled true" example:"This is a reason why the peer has been disabled."`
-	// ExpiresAt is the expiry date of the peer  in YYYY-MM-DD format. An expired peer is not able to connect.
-	ExpiresAt string `json:"ExpiresAt,omitempty" binding:"omitempty,datetime=2006-01-02"`
+	// ExpiresAt is the expiry date and time of the peer in RFC3339 format.
+	ExpiresAt string `json:"ExpiresAt,omitempty"`
 	// Notes is a note field for peers.
 	Notes string `json:"Notes" example:"This is a note for the peer."`
 
@@ -81,7 +80,7 @@ type Peer struct {
 func NewPeer(src *domain.Peer) *Peer {
 	expiresAt := ""
 	if src.ExpiresAt != nil && !src.ExpiresAt.IsZero() {
-		expiresAt = src.ExpiresAt.Format(ExpiryDateTimeLayout)
+		expiresAt = src.ExpiresAt.Format(time.RFC3339)
 	}
 
 	return &Peer{
@@ -132,8 +131,15 @@ func NewDomainPeer(src *Peer) *domain.Peer {
 	cidrs, _ := domain.CidrsFromArray(src.Addresses)
 	var expiresAt *time.Time
 	if src.ExpiresAt != "" {
-		if t, err := time.Parse(ExpiryDateTimeLayout, src.ExpiresAt); err == nil {
+		// Remove any extra quotes and whitespace that might be present
+		timeStr := strings.Trim(strings.TrimSpace(src.ExpiresAt), "\"'")
+		if t, err := time.Parse(time.RFC3339, timeStr); err == nil {
 			expiresAt = &t
+		} else {
+			// Try parsing without nanoseconds if the first attempt fails
+			if t, err := time.Parse("2006-01-02T15:04:05Z", timeStr); err == nil {
+				expiresAt = &t
+			}
 		}
 	}
 

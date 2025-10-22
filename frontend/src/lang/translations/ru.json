@@ -469,7 +469,9 @@
         "label": "Ignore global settings"
       },
       "expires-at": {
-        "label": "Expiry date"
+        "label": "Дата и время истечения",
+        "date-placeholder": "Дата",
+        "time-placeholder": "Время"
       }
     },
     "peer-multi-create": {

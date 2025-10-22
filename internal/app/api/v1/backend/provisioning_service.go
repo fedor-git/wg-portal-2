@@ -171,9 +171,9 @@ func (p ProvisioningService) NewPeer(ctx context.Context, req models.Provisionin
 	}
 
 	if req.ExpiresAt != "" {
-		expiryDate, err := time.Parse("2006-01-02", req.ExpiresAt)
+		expiryDate, err := time.Parse(time.RFC3339, req.ExpiresAt)
 		if err != nil {
-			return nil, fmt.Errorf("invalid ExpiresAt format: %w", err)
+			return nil, fmt.Errorf("invalid ExpiresAt format, expected RFC3339: %w", err)
 		}
 		peer.ExpiresAt = &expiryDate
 	}

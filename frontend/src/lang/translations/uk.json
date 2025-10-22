@@ -492,7 +492,9 @@
         "label": "Ігнорувати глобальні налаштування"
       },
       "expires-at": {
-        "label": "Дата закінчення терміну дії"
+        "label": "Дата і час закінчення",
+        "date-placeholder": "Дата",
+        "time-placeholder": "Час"
       }
     },
     "peer-multi-create": {

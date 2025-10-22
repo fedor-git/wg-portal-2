@@ -235,6 +235,12 @@ func (e PeerEndpoint) handleCreatePost() http.HandlerFunc {
 			respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
 			return
 		}
+		
+		// Log the received ExpiresAt value for debugging
+		if peer.ExpiresAt != "" {
+			slog.Debug("Creating peer with ExpiresAt value", "raw_value", peer.ExpiresAt)
+		}
+		
 		if err := e.validator.Struct(peer); err != nil {
 			respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
 			return
@@ -287,6 +293,12 @@ func (e PeerEndpoint) handleUpdatePut() http.HandlerFunc {
 			respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
 			return
 		}
+		
+		// Log the received ExpiresAt value for debugging
+		if peer.ExpiresAt != "" {
+			slog.Debug("Received ExpiresAt value", "raw_value", peer.ExpiresAt, "peer_id", id)
+		}
+		
 		if err := e.validator.Struct(peer); err != nil {
 			respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
 			return
