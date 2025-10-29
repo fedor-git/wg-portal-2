@@ -170,12 +170,16 @@ func (c *ControllerManager) GetControllerNames() []config.BackendBase {
 }
 
 func (c *ControllerManager) ListPeers(ctx context.Context, iface string) ([]domain.Peer, error) {
-	controller, exists := c.controllers[domain.InterfaceBackend(iface)]
+	// Get interface from database to determine the correct backend
+	ifaceId := domain.InterfaceIdentifier(iface)
+	
+	// For now, try local controller first (most common case)
+	localController, exists := c.controllers[config.LocalBackendName]
 	if !exists {
-		return nil, fmt.Errorf("interface controller not found for iface: %s", iface)
+		return nil, fmt.Errorf("local interface controller not found")
 	}
 
-	peers, err := controller.Implementation.GetPeers(ctx, domain.InterfaceIdentifier(iface))
+	peers, err := localController.Implementation.GetPeers(ctx, ifaceId)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list peers for iface %s: %w", iface, err)
 	}
@@ -198,12 +202,13 @@ func (c *ControllerManager) ListPeers(ctx context.Context, iface string) ([]doma
 }
 
 func (c *ControllerManager) RemovePeer(ctx context.Context, iface string, peerID string) error {
-	controller, exists := c.controllers[domain.InterfaceBackend(iface)]
+	// Use local controller for interface operations
+	localController, exists := c.controllers[config.LocalBackendName]
 	if !exists {
-		return fmt.Errorf("interface controller not found for iface: %s", iface)
+		return fmt.Errorf("local interface controller not found")
 	}
 
-	err := controller.Implementation.DeletePeer(ctx, domain.InterfaceIdentifier(iface), domain.PeerIdentifier(peerID))
+	err := localController.Implementation.DeletePeer(ctx, domain.InterfaceIdentifier(iface), domain.PeerIdentifier(peerID))
 	if err != nil {
 		return fmt.Errorf("failed to remove peer %s from iface %s: %w", peerID, iface, err)
 	}
@@ -212,9 +217,10 @@ func (c *ControllerManager) RemovePeer(ctx context.Context, iface string, peerID
 }
 
 func (c *ControllerManager) SavePeer(ctx context.Context, iface string, peer *domain.Peer) error {
-	controller, exists := c.controllers[domain.InterfaceBackend(iface)]
+	// Use local controller for interface operations  
+	localController, exists := c.controllers[config.LocalBackendName]
 	if !exists {
-		return fmt.Errorf("interface controller not found for iface: %s", iface)
+		return fmt.Errorf("local interface controller not found")
 	}
 
 	updateFunc := func(pp *domain.PhysicalPeer) (*domain.PhysicalPeer, error) {
@@ -226,7 +232,7 @@ func (c *ControllerManager) SavePeer(ctx context.Context, iface string, peer *do
 		return pp, nil
 	}
 
-	if err := controller.Implementation.SavePeer(ctx, domain.InterfaceIdentifier(iface), peer.Identifier, updateFunc); err != nil {
+	if err := localController.Implementation.SavePeer(ctx, domain.InterfaceIdentifier(iface), peer.Identifier, updateFunc); err != nil {
 		return fmt.Errorf("failed to save peer %s on iface %s: %w", peer.Identifier, iface, err)
 	}
 
