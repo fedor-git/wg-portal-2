@@ -144,16 +144,13 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 }
 
 func createHTTPClient(s settings) *http.Client {
-	// Базовий транспорт
 	transport := &http.Transport{}
 
-	// Конфігурація TLS
 	if s.TLSSkipVerify || s.TLSCACertFile != "" || s.TLSClientCertFile != "" {
 		tlsConfig := &tls.Config{
 			InsecureSkipVerify: s.TLSSkipVerify,
 		}
 
-		// Завантаження CA сертифікату
 		if s.TLSCACertFile != "" {
 			caCert, err := os.ReadFile(s.TLSCACertFile)
 			if err != nil {
@@ -169,7 +166,6 @@ func createHTTPClient(s settings) *http.Client {
 			}
 		}
 
-		// Завантаження клієнтського сертифікату
 		if s.TLSClientCertFile != "" && s.TLSClientKeyFile != "" {
 			cert, err := tls.LoadX509KeyPair(s.TLSClientCertFile, s.TLSClientKeyFile)
 			if err != nil {
