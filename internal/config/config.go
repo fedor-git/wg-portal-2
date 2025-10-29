@@ -11,16 +11,20 @@ import (
 )
 
 type FanoutConfig struct {
-	Enabled     bool          `yaml:"enabled"`
-	Peers       []string      `yaml:"peers"`
-	AuthHeader  string        `yaml:"auth_header"`
-	AuthValue   string        `yaml:"auth_value"`
-	Timeout     time.Duration `yaml:"timeout"`
-	Debounce    time.Duration `yaml:"debounce"`
-	SelfURL     string        `yaml:"self_url"`
-	Origin      string        `yaml:"origin" mapstructure:"origin"`
-	KickOnStart bool          `yaml:"kick_on_start" mapstructure:"kick_on_start"`
-	Topics      []string      `yaml:"topics" mapstructure:"topics"`
+	Enabled            bool          `yaml:"enabled"`
+	Peers              []string      `yaml:"peers"`
+	AuthHeader         string        `yaml:"auth_header"`
+	AuthValue          string        `yaml:"auth_value"`
+	Timeout            time.Duration `yaml:"timeout"`
+	Debounce           time.Duration `yaml:"debounce"`
+	SelfURL            string        `yaml:"self_url"`
+	Origin             string        `yaml:"origin" mapstructure:"origin"`
+	KickOnStart        bool          `yaml:"kick_on_start" mapstructure:"kick_on_start"`
+	Topics             []string      `yaml:"topics" mapstructure:"topics"`
+	TLSSkipVerify      bool          `yaml:"tls_skip_verify"`
+	TLSClientCertFile  string        `yaml:"tls_client_cert_file"`
+	TLSClientKeyFile   string        `yaml:"tls_client_key_file"`
+	TLSCACertFile      string        `yaml:"tls_ca_cert_file"`
 }
 
 // Config is the main configuration struct.

@@ -2,10 +2,13 @@ package fanout
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -29,30 +32,38 @@ const (
 )
 
 type settings struct {
-	Enabled     bool
-	Peers       []string
-	AuthHeader  string
-	AuthValue   string
-	Timeout     time.Duration
-	Debounce    time.Duration
-	SelfURL     string
-	Origin      string
-	KickOnStart bool
-	Topics      []string
+	Enabled            bool
+	Peers              []string
+	AuthHeader         string
+	AuthValue          string
+	Timeout            time.Duration
+	Debounce           time.Duration
+	SelfURL            string
+	Origin             string
+	KickOnStart        bool
+	Topics             []string
+	TLSSkipVerify      bool
+	TLSClientCertFile  string
+	TLSClientKeyFile   string
+	TLSCACertFile      string
 }
 
 func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardManager *wireguard.Manager, collector *wireguard.StatisticsCollector) {
 	s := settings{
-		Enabled:     fc.Enabled,
-		Peers:       append([]string(nil), fc.Peers...),
-		AuthHeader:  fc.AuthHeader,
-		AuthValue:   fc.AuthValue,
-		Timeout:     fc.Timeout,
-		Debounce:    fc.Debounce,
-		SelfURL:     fc.SelfURL,
-		Origin:      fc.Origin,
-		KickOnStart: fc.KickOnStart,
-		Topics:      append([]string(nil), fc.Topics...),
+		Enabled:            fc.Enabled,
+		Peers:              append([]string(nil), fc.Peers...),
+		AuthHeader:         fc.AuthHeader,
+		AuthValue:          fc.AuthValue,
+		Timeout:            fc.Timeout,
+		Debounce:           fc.Debounce,
+		SelfURL:            fc.SelfURL,
+		Origin:             fc.Origin,
+		KickOnStart:        fc.KickOnStart,
+		Topics:             append([]string(nil), fc.Topics...),
+		TLSSkipVerify:      fc.TLSSkipVerify,
+		TLSClientCertFile:  fc.TLSClientCertFile,
+		TLSClientKeyFile:   fc.TLSClientKeyFile,
+		TLSCACertFile:      fc.TLSCACertFile,
 	}
 
 	if !s.Enabled {
@@ -88,10 +99,8 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 	}
 
 	f := &fanout{
-		cfg: s,
-		client: &http.Client{
-			Timeout: s.Timeout,
-		},
+		cfg:      s,
+		client:   createHTTPClient(s),
 		debounce: newDebouncer(s.Debounce),
 	}
 	if bus != nil {
@@ -132,6 +141,50 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 		"debounce", s.Debounce.String(),
 		"timeout", s.Timeout.String(),
 	)
+}
+
+func createHTTPClient(s settings) *http.Client {
+	transport := &http.Transport{}
+
+	if s.TLSSkipVerify || s.TLSCACertFile != "" || s.TLSClientCertFile != "" {
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: s.TLSSkipVerify,
+		}
+
+		if s.TLSCACertFile != "" {
+			caCert, err := os.ReadFile(s.TLSCACertFile)
+			if err != nil {
+				slog.Warn("[FANOUT] failed to read CA certificate", "file", s.TLSCACertFile, "err", err)
+			} else {
+				caCertPool := x509.NewCertPool()
+				if caCertPool.AppendCertsFromPEM(caCert) {
+					tlsConfig.RootCAs = caCertPool
+					slog.Debug("[FANOUT] loaded CA certificate", "file", s.TLSCACertFile)
+				} else {
+					slog.Warn("[FANOUT] failed to parse CA certificate", "file", s.TLSCACertFile)
+				}
+			}
+		}
+
+		if s.TLSClientCertFile != "" && s.TLSClientKeyFile != "" {
+			cert, err := tls.LoadX509KeyPair(s.TLSClientCertFile, s.TLSClientKeyFile)
+			if err != nil {
+				slog.Warn("[FANOUT] failed to load client certificate", 
+					"cert", s.TLSClientCertFile, "key", s.TLSClientKeyFile, "err", err)
+			} else {
+				tlsConfig.Certificates = []tls.Certificate{cert}
+				slog.Debug("[FANOUT] loaded client certificate", 
+					"cert", s.TLSClientCertFile, "key", s.TLSClientKeyFile)
+			}
+		}
+
+		transport.TLSClientConfig = tlsConfig
+	}
+
+	return &http.Client{
+		Timeout:   s.Timeout,
+		Transport: transport,
+	}
 }
 
 type fanout struct {

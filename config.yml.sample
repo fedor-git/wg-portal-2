@@ -96,3 +96,32 @@ auth:
         admin_group_regex: ^admin-group-name$
       registration_enabled: true
       log_user_info: true
+
+# FANOUT configuration for peer synchronization between multiple servers
+fanout:
+  enabled: false  # Set to true to enable FANOUT synchronization
+  peers:  # List of other wg-portal-2 instances to sync with (use internal Docker network URLs)
+    - "http://wg-server-2:8888"
+    - "http://wg-server-3:8888"
+    - "http://wg-server-4:8888"
+    - "http://wg-server-5:8888"
+  auth_header: "Authorization"  # Header name for authentication
+  auth_value: "Bearer your-secret-token"  # Authentication value
+  timeout: 10s  # HTTP request timeout
+  debounce: 500ms  # Debounce delay to prevent too frequent sync requests
+  self_url: "http://wg-server-1:8888"  # This server's URL (internal Docker network)
+  origin: "wg-server-1"  # Optional: custom origin identifier
+  kick_on_start: true  # Trigger sync on startup
+  topics:  # Events that trigger synchronization
+    - "peer:created"
+    - "peer:updated"
+    - "peer:deleted"
+    - "interface:created"
+    - "interface:updated"
+    - "interface:deleted"
+  
+  # TLS/SSL configuration (only needed for HTTPS URLs or external communication)
+  tls_skip_verify: false  # Set to true to skip SSL certificate verification (NOT recommended for production)
+  tls_ca_cert_file: ""  # Path to CA certificate file for custom CA (optional)
+  tls_client_cert_file: ""  # Path to client certificate file for mutual TLS authentication (optional)
+  tls_client_key_file: ""  # Path to client private key file for mutual TLS authentication (optional)
