@@ -14,6 +14,7 @@ type PeerServicePeerManagerRepo interface {
 	GetPeer(ctx context.Context, id domain.PeerIdentifier) (*domain.Peer, error)
 	GetUserPeers(ctx context.Context, id domain.UserIdentifier) ([]domain.Peer, error)
 	GetInterfaceAndPeers(ctx context.Context, id domain.InterfaceIdentifier) (*domain.Interface, []domain.Peer, error)
+	GetAllInterfaces(ctx context.Context) ([]domain.Interface, error)
 	PreparePeer(ctx context.Context, id domain.InterfaceIdentifier) (*domain.Peer, error)
 	CreatePeer(ctx context.Context, peer *domain.Peer) (*domain.Peer, error)
 	UpdatePeer(ctx context.Context, peer *domain.Peer) (*domain.Peer, error)
@@ -97,6 +98,19 @@ func (s PeerService) GetById(ctx context.Context, id domain.PeerIdentifier) (*do
 	}
 
 	return peer, nil
+}
+
+func (s PeerService) GetAllInterfaces(ctx context.Context) ([]domain.Interface, error) {
+	if err := domain.ValidateAdminAccessRights(ctx); err != nil {
+		return nil, err
+	}
+
+	interfaces, err := s.peers.GetAllInterfaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return interfaces, nil
 }
 
 func (s PeerService) Prepare(ctx context.Context, id domain.InterfaceIdentifier) (*domain.Peer, error) {

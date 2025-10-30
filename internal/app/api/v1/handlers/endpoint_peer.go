@@ -18,6 +18,7 @@ type PeerService interface {
 	GetForInterface(context.Context, domain.InterfaceIdentifier) ([]domain.Peer, error)
 	GetForUser(context.Context, domain.UserIdentifier) ([]domain.Peer, error)
 	GetById(context.Context, domain.PeerIdentifier) (*domain.Peer, error)
+	GetAllInterfaces(context.Context) ([]domain.Interface, error)
 	Prepare(ctx context.Context, id domain.InterfaceIdentifier) (*domain.Peer, error)
 	Create(context.Context, *domain.Peer) (*domain.Peer, error)
 	Update(context.Context, domain.PeerIdentifier, *domain.Peer) (*domain.Peer, error)
@@ -364,7 +365,25 @@ func (e PeerEndpoint) handleSyncPost() http.HandlerFunc {
             ctx = app.WithNoFanout(ctx)
         }
         count, err := e.peers.SyncAllPeersFromDB(ctx)
-        if err != nil { /* ... */ }
+        if err != nil { 
+            respond.JSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+            return
+        }
+        
+        // Force interface update events after sync, even with NoFanout
+        // This ensures config files and routes are updated after peer sync
+        // Always publish events, even if no peers were synced (e.g., when last peer is deleted)
+        interfaces, err := e.peers.GetAllInterfaces(ctx)
+        if err != nil {
+            slog.Warn("failed to get interfaces for update events", "error", err)
+            // Fallback to hardcoded interface if we can't get interfaces
+            e.publish(app.TopicPeerInterfaceUpdated, "wg0")
+        } else {
+            for _, iface := range interfaces {
+                e.publish(app.TopicPeerInterfaceUpdated, iface.Identifier)
+            }
+        }
+        
         respond.JSON(w, http.StatusOK, map[string]any{"synced": count})
     }
 }

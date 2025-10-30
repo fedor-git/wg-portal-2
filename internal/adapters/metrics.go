@@ -231,3 +231,55 @@ func (m *MetricsServer) RemovePeerMetrics(peer *domain.Peer) {
 
        slog.Info("Completed removal of metrics for peer by id", "id", peerId, "name", peer.DisplayName)
 }
+
+// Remove all peer metrics by id only (for when peer object is no longer available)
+func (m *MetricsServer) RemovePeerMetricsByID(peerId string) {
+       slog.Debug("Starting removal of metrics for peer by id", "id", peerId, "name", "unknown")
+
+       mfs, err := m.registry.Gather()
+       if err != nil {
+	       slog.Warn("Failed to gather metrics for removal", "err", err)
+	       return
+       }
+
+       metricMap := map[string]*prometheus.GaugeVec{
+	       "wireguard_peer_up": m.peerIsConnected,
+	       "wireguard_peer_last_handshake_seconds": m.peerLastHandshakeSeconds,
+	       "wireguard_peer_received_bytes_total": m.peerReceivedBytesTotal,
+	       "wireguard_peer_sent_bytes_total": m.peerSendBytesTotal,
+       }
+
+       for _, mf := range mfs {
+	       name := mf.GetName()
+	       vec, ok := metricMap[name]
+	       if !ok {
+		       continue
+	       }
+	       for _, mtr := range mf.GetMetric() {
+		       var labelValues []string
+		       var found bool
+		       for _, label := range mtr.GetLabel() {
+			       if label.GetName() == "id" && label.GetValue() == peerId {
+				       found = true
+			       }
+		       }
+		       if found {
+			       // Відновлюємо label values у правильному порядку
+			       for _, l := range peerLabels {
+				       val := ""
+				       for _, label := range mtr.GetLabel() {
+					       if label.GetName() == l {
+						       val = label.GetValue()
+						       break
+					       }
+				       }
+				       labelValues = append(labelValues, val)
+			       }
+			       vec.DeleteLabelValues(labelValues...)
+			       slog.Debug("Removed metric by id", "metric", name, "id", peerId, "labels", labelValues)
+		       }
+	       }
+       }
+
+       slog.Info("Completed removal of metrics for peer by id", "id", peerId, "name", "unknown")
+}

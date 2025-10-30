@@ -25,6 +25,9 @@ func (s *eventingPeerService) GetForUser(ctx context.Context, id domain.UserIden
 func (s *eventingPeerService) GetById(ctx context.Context, id domain.PeerIdentifier) (*domain.Peer, error) {
     return s.inner.GetById(ctx, id)
 }
+func (s *eventingPeerService) GetAllInterfaces(ctx context.Context) ([]domain.Interface, error) {
+    return s.inner.GetAllInterfaces(ctx)
+}
 func (s *eventingPeerService) Prepare(ctx context.Context, id domain.InterfaceIdentifier) (*domain.Peer, error) {
     return s.inner.Prepare(ctx, id)
 }

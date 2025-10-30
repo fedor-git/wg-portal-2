@@ -14,7 +14,10 @@ func SubscribeToPeerDelete(bus EventBus, metricsServer *adapters.MetricsServer, 
 		ctx := context.Background()
 		peer, err := repo.GetPeer(ctx, peerID)
 		if err != nil {
-			slog.Error("Failed to fetch peer for metrics removal", "peerID", peerID, "error", err)
+			slog.Debug("Peer not found for metrics removal, removing by ID", "peerID", peerID, "error", err)
+			// Peer already deleted from DB, remove metrics by ID directly
+			metricsServer.RemovePeerMetricsByID(string(peerID))
+			slog.Info("Metrics removed for peer by ID", "peerID", peerID)
 			return
 		}
 		metricsServer.RemovePeerMetrics(peer)
