@@ -3,6 +3,7 @@ package wireguard
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,6 +102,7 @@ func (m Manager) connectToMessageBus() {
 	_ = m.bus.Subscribe(app.TopicUserEnabled, m.handleUserEnabledEvent)
 	_ = m.bus.Subscribe(app.TopicPeerStateChanged, m.handlePeerStateChangeEvent)
 	_ = m.bus.Subscribe(app.TopicUserDeleted, m.handleUserDeletedEvent)
+	_ = m.bus.Subscribe(app.TopicPeerInterfaceUpdated, m.handlePeerInterfaceUpdatedEvent)
 }
 
 func (m Manager) handleUserCreationEvent(user domain.User) {
@@ -437,4 +439,111 @@ func (m Manager) initializePeerTTL(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (m Manager) handlePeerInterfaceUpdatedEvent(interfaceId domain.InterfaceIdentifier) {
+	ctx := context.Background()
+	
+	slog.Debug("handling peer interface updated event for WireGuard sync", "interface", interfaceId)
+	
+	// Get current peers from database
+	dbPeers, err := m.db.GetInterfacePeers(ctx, interfaceId)
+	if err != nil {
+		slog.Error("failed to get interface peers from DB", "interface", interfaceId, "error", err)
+		return
+	}
+	
+	slog.Debug("WireGuard sync found peers in DB", "interface", interfaceId, "count", len(dbPeers))
+	for _, peer := range dbPeers {
+		slog.Debug("DB peer", "interface", interfaceId, "peer", peer.Identifier, "disabled", peer.IsDisabled())
+	}
+	
+	// Get local controller
+	localController := m.wg.GetControllerByName(config.LocalBackendName)
+	if localController == nil {
+		slog.Error("local interface controller not found")
+		return
+	}
+	
+	// Get current peers from WireGuard device
+	wgPeers, err := localController.GetPeers(ctx, interfaceId)
+	if err != nil {
+		slog.Error("failed to get peers from WireGuard device", "interface", interfaceId, "error", err)
+		return
+	}
+	
+	slog.Debug("WireGuard sync found peers in WG device", "interface", interfaceId, "count", len(wgPeers))
+	for _, peer := range wgPeers {
+		slog.Debug("WG peer", "interface", interfaceId, "peer", peer.Identifier)
+	}
+	
+	// Create maps for easier comparison
+	dbPeerMap := make(map[domain.PeerIdentifier]domain.Peer)
+	for _, peer := range dbPeers {
+		dbPeerMap[peer.Identifier] = peer
+	}
+	
+	wgPeerMap := make(map[domain.PeerIdentifier]domain.PhysicalPeer)
+	for _, peer := range wgPeers {
+		wgPeerMap[peer.Identifier] = peer
+	}
+	
+	// Remove peers that exist in WireGuard but not in DB
+	for wgPeerID := range wgPeerMap {
+		if _, exists := dbPeerMap[wgPeerID]; !exists {
+			slog.Debug("removing peer from WireGuard device", "interface", interfaceId, "peer", wgPeerID)
+			err := localController.DeletePeer(ctx, interfaceId, wgPeerID)
+			if err != nil {
+				slog.Error("failed to remove peer from WireGuard device", "interface", interfaceId, "peer", wgPeerID, "error", err)
+			}
+		}
+	}
+	
+	// Add or update peers that exist in DB but not in WireGuard or are different
+	for _, dbPeer := range dbPeers {
+		if dbPeer.IsDisabled() {
+			// If peer is disabled in DB, make sure it's removed from WireGuard
+			if _, exists := wgPeerMap[dbPeer.Identifier]; exists {
+				slog.Debug("removing disabled peer from WireGuard device", "interface", interfaceId, "peer", dbPeer.Identifier)
+				err := localController.DeletePeer(ctx, interfaceId, dbPeer.Identifier)
+				if err != nil {
+					slog.Error("failed to remove disabled peer from WireGuard device", "interface", interfaceId, "peer", dbPeer.Identifier, "error", err)
+				}
+			}
+			continue
+		}
+		
+		// Peer is enabled, make sure it exists in WireGuard with correct configuration
+		slog.Debug("syncing peer in WireGuard device", "interface", interfaceId, "peer", dbPeer.Identifier)
+		err := localController.SavePeer(ctx, interfaceId, dbPeer.Identifier, func(pp *domain.PhysicalPeer) (*domain.PhysicalPeer, error) {
+			// Convert domain.Peer to domain.PhysicalPeer format
+			pp.Identifier = dbPeer.Identifier
+			pp.Endpoint = dbPeer.Endpoint.Value
+			
+			// Parse allowed IPs
+			allowedIPs := []domain.Cidr{}
+			if dbPeer.AllowedIPsStr.Value != "" {
+				for _, ip := range strings.Split(dbPeer.AllowedIPsStr.Value, ",") {
+					trimmedIP := strings.TrimSpace(ip)
+					if trimmedIP != "" {
+						cidr, err := domain.CidrFromString(trimmedIP)
+						if err == nil {
+							allowedIPs = append(allowedIPs, cidr)
+						}
+					}
+				}
+			}
+			pp.AllowedIPs = allowedIPs
+			
+			pp.PresharedKey = dbPeer.PresharedKey
+			pp.PersistentKeepalive = dbPeer.PersistentKeepalive.Value
+			
+			return pp, nil
+		})
+		if err != nil {
+			slog.Error("failed to sync peer in WireGuard device", "interface", interfaceId, "peer", dbPeer.Identifier, "error", err)
+		}
+	}
+	
+	slog.Debug("completed WireGuard interface sync", "interface", interfaceId)
 }

@@ -225,6 +225,11 @@ func (m Manager) RestoreInterfaceState(
 		if err != nil && !iface.IsDisabled() {
 			slog.Debug("creating missing interface", "interface", iface.Identifier)
 
+			// Save original interface state before temporarily disabling it
+			originalIface := iface
+			// Ensure SaveConfig is set correctly based on current config
+			originalIface.SaveConfig = m.cfg.Advanced.ConfigStoragePath != ""
+
 			// temporarily disable interface in database so that the current state is reflected correctly
 			_ = m.db.SaveInterface(ctx, iface.Identifier,
 				func(in *domain.Interface) (*domain.Interface, error) {
@@ -234,8 +239,8 @@ func (m Manager) RestoreInterfaceState(
 					return in, nil
 				})
 
-			// try to create a new interface
-			_, err = m.saveInterface(ctx, &iface)
+			// try to create a new interface using the original state (not disabled)
+			createdIface, err := m.saveInterface(ctx, &originalIface)
 			if err != nil {
 				if updateDbOnError {
 					// disable interface in database as no physical interface exists
@@ -248,6 +253,12 @@ func (m Manager) RestoreInterfaceState(
 						})
 				}
 				return fmt.Errorf("failed to create physical interface %s: %w", iface.Identifier, err)
+			}
+
+			// Force trigger interface creation event for config file generation
+			if createdIface != nil && createdIface.SaveConfig && m.cfg.Advanced.ConfigStoragePath != "" {
+				slog.Debug("forcing config file creation for new interface", "interface", createdIface.Identifier)
+				m.bus.Publish(app.TopicInterfaceCreated, *createdIface)
 			}
 		} else {
 			slog.Debug("restoring interface state", "interface", iface.Identifier, "disabled", iface.IsDisabled())

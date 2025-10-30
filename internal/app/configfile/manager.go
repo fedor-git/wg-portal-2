@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/yeqown/go-qrcode/v2"
 	"github.com/yeqown/go-qrcode/writer/compressed"
@@ -161,6 +162,9 @@ func (m Manager) handlePeerInterfaceUpdatedEvent(id domain.InterfaceIdentifier) 
 
 	slog.Debug("handling peer interface updated event", "interface", id)
 
+	// Add a small delay to ensure WireGuard interface sync completes first
+	time.Sleep(100 * time.Millisecond)
+
 	err = m.PersistInterfaceConfig(context.Background(), peerInterface.Identifier)
 	if err != nil {
 		slog.Error("failed to automatically persist interface config",
@@ -257,6 +261,13 @@ func (m Manager) PersistInterfaceConfig(ctx context.Context, id domain.Interface
 		return fmt.Errorf("failed to fetch interface %s: %w", id, err)
 	}
 
+	slog.Debug("persisting interface config", "interface", id, "peerCount", len(peers), "filename", iface.GetConfigFileName())
+	
+	// Log peer details for debugging
+	for _, peer := range peers {
+		slog.Debug("config will include peer", "interface", id, "peer", peer.Identifier, "disabled", peer.IsDisabled())
+	}
+
 	cfg, err := m.tplHandler.GetInterfaceConfig(iface, peers)
 	if err != nil {
 		return fmt.Errorf("failed to get interface config: %w", err)
@@ -266,6 +277,7 @@ func (m Manager) PersistInterfaceConfig(ctx context.Context, id domain.Interface
 		return fmt.Errorf("failed to write interface config: %w", err)
 	}
 
+	slog.Info("interface config persisted", "interface", id, "filename", iface.GetConfigFileName(), "peerCount", len(peers))
 	return nil
 }
 
