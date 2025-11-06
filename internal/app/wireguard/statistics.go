@@ -167,12 +167,53 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 			}
 
 			for _, in := range interfaces {
-				peers, err := c.wg.GetController(in).GetPeers(ctx, in.Identifier)
+				// Get peers from WireGuard (physical interface)
+				wireguardPeers, err := c.wg.GetController(in).GetPeers(ctx, in.Identifier)
 				if err != nil {
 					slog.Warn("failed to fetch peers for data collection", "interface", in.Identifier, "error", err)
 					continue
 				}
-				for _, peer := range peers {
+
+				// Create map of existing WireGuard peers for quick lookup
+				wireguardPeerMap := make(map[domain.PeerIdentifier]bool)
+				for _, peer := range wireguardPeers {
+					wireguardPeerMap[peer.Identifier] = true
+				}
+
+				// Get all peers from database for this interface
+				dbPeers, err := c.db.GetInterfacePeers(ctx, in.Identifier)
+				if err != nil {
+					slog.Warn("failed to fetch database peers for cleanup", "interface", in.Identifier, "error", err)
+				} else {
+					// Clean up statuses for peers that no longer exist in WireGuard
+					for _, dbPeer := range dbPeers {
+						if !wireguardPeerMap[dbPeer.Identifier] {
+							// Peer exists in DB but not in WireGuard - it might have been deleted
+							// Set metrics to zero/disconnected state
+							err := c.db.UpdatePeerStatus(ctx, dbPeer.Identifier,
+								func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
+									if p.IsConnected || p.IsPingable {
+										slog.Debug("peer not found in wireguard, marking as disconnected",
+											"peer", dbPeer.Identifier)
+										p.IsConnected = false
+										p.IsPingable = false
+										p.LastHandshake = nil
+										p.UpdatedAt = time.Now()
+
+										// Update metrics to show disconnected state
+										go c.updatePeerMetrics(ctx, *p)
+									}
+									return p, nil
+								})
+							if err != nil {
+								slog.Warn("failed to update disconnected peer status", "peer", dbPeer.Identifier, "error", err)
+							}
+						}
+					}
+				}
+
+				// Process WireGuard peers
+				for _, peer := range wireguardPeers {
 					var connectionStateChanged bool
 					var newPeerStatus domain.PeerStatus
 					err = c.db.UpdatePeerStatus(ctx, peer.Identifier,
@@ -411,6 +452,7 @@ func (c *StatisticsCollector) updatePeerMetrics(ctx context.Context, status doma
 
 func (c *StatisticsCollector) connectToMessageBus() {
 	_ = c.bus.Subscribe(app.TopicPeerIdentifierUpdated, c.handlePeerIdentifierChangeEvent)
+	_ = c.bus.Subscribe(app.TopicPeerDeleted, c.handlePeerDeleteEvent)
 }
 
 func (c *StatisticsCollector) handlePeerIdentifierChangeEvent(oldIdentifier, newIdentifier domain.PeerIdentifier) {
@@ -422,4 +464,25 @@ func (c *StatisticsCollector) handlePeerIdentifierChangeEvent(oldIdentifier, new
 		slog.Error("failed to delete old peer status for migrated peer", "oldIdentifier", oldIdentifier,
 			"newIdentifier", newIdentifier, "error", err)
 	}
+}
+
+func (c *StatisticsCollector) handlePeerDeleteEvent(peer domain.Peer) {
+	ctx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
+
+	// Remove peer status from database
+	err := c.db.DeletePeerStatus(ctx, peer.Identifier)
+	if err != nil {
+		slog.Error("failed to delete peer status for deleted peer", "peerIdentifier", peer.Identifier, "error", err)
+	} else {
+		slog.Debug("deleted peer status for deleted peer", "peerIdentifier", peer.Identifier)
+	}
+
+	// Remove metrics for the deleted peer
+	c.ms.UpdatePeerMetrics(&peer, domain.PeerStatus{
+		PeerId:      peer.Identifier,
+		IsConnected: false,
+		IsPingable:  false,
+	})
+	
+	slog.Debug("cleaned up metrics for deleted peer", "peerIdentifier", peer.Identifier)
 }

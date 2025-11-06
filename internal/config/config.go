@@ -72,15 +72,16 @@ type Config struct {
 	Backend Backend `yaml:"backend"`
 
 	Statistics struct {
-		UsePingChecks          bool          `yaml:"use_ping_checks"`
-		PingCheckWorkers       int           `yaml:"ping_check_workers"`
-		PingUnprivileged       bool          `yaml:"ping_unprivileged"`
-		PingCheckInterval      time.Duration `yaml:"ping_check_interval"`
-		DataCollectionInterval time.Duration `yaml:"data_collection_interval"`
-		CollectInterfaceData   bool          `yaml:"collect_interface_data"`
-		CollectPeerData        bool          `yaml:"collect_peer_data"`
-		CollectAuditData       bool          `yaml:"collect_audit_data"`
-		ListeningAddress       string        `yaml:"listening_address"`
+		UsePingChecks            bool          `yaml:"use_ping_checks"`
+		PingCheckWorkers         int           `yaml:"ping_check_workers"`
+		PingUnprivileged         bool          `yaml:"ping_unprivileged"`
+		PingCheckInterval        time.Duration `yaml:"ping_check_interval"`
+		DataCollectionInterval   time.Duration `yaml:"data_collection_interval"`
+		CollectInterfaceData     bool          `yaml:"collect_interface_data"`
+		CollectPeerData          bool          `yaml:"collect_peer_data"`
+		CollectAuditData         bool          `yaml:"collect_audit_data"`
+		ListeningAddress         string        `yaml:"listening_address"`
+		ExportDetailedPeerMetrics bool         `yaml:"export_detailed_peer_metrics"`
 	} `yaml:"statistics"`
 
 	Mail MailConfig `yaml:"mail"`
@@ -195,6 +196,7 @@ func defaultConfig() *Config {
 	cfg.Statistics.CollectPeerData = true
 	cfg.Statistics.CollectAuditData = true
 	cfg.Statistics.ListeningAddress = ":8787"
+	cfg.Statistics.ExportDetailedPeerMetrics = true
 
 	cfg.Mail = MailConfig{
 		Host:           "127.0.0.1",
