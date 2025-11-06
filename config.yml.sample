@@ -20,6 +20,19 @@ webhook:
   authentication: ""
   timeout: 10s
 
+# Statistics and metrics configuration
+statistics:
+  use_ping_checks: true  # Enable ICMP ping checks for peer connectivity
+  ping_check_workers: 10  # Number of concurrent ping check workers
+  ping_unprivileged: false  # Use unprivileged ping (requires system configuration)
+  ping_check_interval: 1m  # How often to ping peers
+  data_collection_interval: 1m  # How often to collect data from WireGuard
+  collect_interface_data: true  # Collect interface statistics
+  collect_peer_data: true  # Collect peer statistics
+  collect_audit_data: true  # Collect audit data
+  listening_address: ":8787"  # Prometheus metrics endpoint address
+  export_detailed_peer_metrics: false  # false = export only wireguard_peer_up; true = export handshake, bytes received/transmitted (more metrics, more load)
+
 auth:
   ldap:
     - id: ldap1
