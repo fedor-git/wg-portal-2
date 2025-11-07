@@ -27,6 +27,15 @@ func (m Manager) SyncAllPeersFromDB(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("wg controller is nil")
 	}
 
+	// Clean orphaned statuses BEFORE syncing WireGuard
+	// This allows us to detect peers in WireGuard that shouldn't be there
+	if m.statsCollector != nil {
+		slog.Info("SyncAllPeersFromDB: calling CleanOrphanedStatuses BEFORE sync")
+		m.statsCollector.CleanOrphanedStatuses(ctx)
+	} else {
+		slog.Warn("SyncAllPeersFromDB: statsCollector is nil, skipping orphaned cleanup")
+	}
+
 	ifaces, err := m.db.GetAllInterfaces(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("list interfaces: %w", err)
@@ -79,9 +88,6 @@ func (m Manager) SyncAllPeersFromDB(ctx context.Context) (int, error) {
 		}
 	}
 
-	// if m.statsCollector != nil {
-	// 	m.statsCollector.CleanOrphanPeerMetrics(ctx)
-	// }
 	return applied, nil
 }
 

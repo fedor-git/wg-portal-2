@@ -15,6 +15,8 @@ type StatisticsDatabaseRepo interface {
 	GetAllInterfaces(ctx context.Context) ([]domain.Interface, error)
 	GetInterfacePeers(ctx context.Context, id domain.InterfaceIdentifier) ([]domain.Peer, error)
 	GetPeer(ctx context.Context, id domain.PeerIdentifier) (*domain.Peer, error)
+	GetAllPeers(ctx context.Context) ([]domain.Peer, error)
+	GetAllPeerStatuses(ctx context.Context) ([]domain.PeerStatus, error)
 	UpdatePeerStatus(
 		ctx context.Context,
 		id domain.PeerIdentifier,
@@ -31,6 +33,8 @@ type StatisticsDatabaseRepo interface {
 type StatisticsMetricsServer interface {
 	UpdateInterfaceMetrics(status domain.InterfaceStatus)
 	UpdatePeerMetrics(peer *domain.Peer, status domain.PeerStatus)
+	RemovePeerMetrics(peer *domain.Peer)
+	RemovePeerMetricsByID(peerId string)
 }
 
 type StatisticsEventBus interface {
@@ -185,11 +189,17 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 				if err != nil {
 					slog.Warn("failed to fetch database peers for cleanup", "interface", in.Identifier, "error", err)
 				} else {
+					// Create map of database peers for quick lookup
+					dbPeerMap := make(map[domain.PeerIdentifier]bool)
+					for _, dbPeer := range dbPeers {
+						dbPeerMap[dbPeer.Identifier] = true
+					}
+					
 					// Clean up statuses for peers that no longer exist in WireGuard
 					for _, dbPeer := range dbPeers {
 						if !wireguardPeerMap[dbPeer.Identifier] {
-							// Peer exists in DB but not in WireGuard - it might have been deleted
-							// Set metrics to zero/disconnected state
+							// Peer exists in DB but not in WireGuard - mark as disconnected
+							// Do NOT delete metrics, just set to 0 (peer still exists in DB)
 							err := c.db.UpdatePeerStatus(ctx, dbPeer.Identifier,
 								func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
 									if p.IsConnected || p.IsPingable {
@@ -200,7 +210,7 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 										p.LastHandshake = nil
 										p.UpdatedAt = time.Now()
 
-										// Update metrics to show disconnected state
+										// Update metrics to show disconnected state (metrics = 0)
 										go c.updatePeerMetrics(ctx, *p)
 									}
 									return p, nil
@@ -208,6 +218,16 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 							if err != nil {
 								slog.Warn("failed to update disconnected peer status", "peer", dbPeer.Identifier, "error", err)
 							}
+						}
+					}
+					
+					// Also clean up metrics for WireGuard peers that no longer exist in DB
+					// This handles the case where peer was deleted but metrics remain
+					for _, wgPeer := range wireguardPeers {
+						if !dbPeerMap[wgPeer.Identifier] {
+							slog.Debug("peer found in wireguard but not in database, removing metrics",
+								"peer", wgPeer.Identifier)
+							c.ms.RemovePeerMetricsByID(string(wgPeer.Identifier))
 						}
 					}
 				}
@@ -444,7 +464,11 @@ func (c *StatisticsCollector) updatePeerMetrics(ctx context.Context, status doma
 	// Fetch peer data from the database
 	peer, err := c.db.GetPeer(ctx, status.PeerId)
 	if err != nil {
-		slog.Warn("failed to fetch peer data for metrics", "peer", status.PeerId, "error", err)
+		// Peer not found in database - it's orphaned.
+		// NOTE: We do NOT delete peer_status here.
+		// The orphaned status will be cleaned up by CleanOrphanedStatuses on all cluster nodes.
+		// This ensures proper cleanup across distributed systems.
+		slog.Debug("skipping metrics update for orphaned peer", "peer", status.PeerId)
 		return
 	}
 	c.ms.UpdatePeerMetrics(peer, status)
@@ -467,22 +491,92 @@ func (c *StatisticsCollector) handlePeerIdentifierChangeEvent(oldIdentifier, new
 }
 
 func (c *StatisticsCollector) handlePeerDeleteEvent(peer domain.Peer) {
-	ctx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
+	// NOTE: We do NOT delete peer_status from database here.
+	// The peer_status will be cleaned up by CleanOrphanedStatuses on all cluster nodes.
+	// This ensures that other nodes can detect orphaned statuses and clean up their metrics.
 
-	// Remove peer status from database
-	err := c.db.DeletePeerStatus(ctx, peer.Identifier)
+	// Remove metrics for the deleted peer on THIS node
+	c.ms.RemovePeerMetrics(&peer)
+	
+	slog.Debug("cleaned up metrics for deleted peer on local node", "peerIdentifier", peer.Identifier)
+}
+
+// CleanOrphanedStatuses removes peer statuses and metrics for peers that no longer exist in the database.
+// This is called after SyncAllPeersFromDB to ensure orphaned statuses are cleaned up across all cluster nodes.
+func (c *StatisticsCollector) CleanOrphanedStatuses(ctx context.Context) {
+	slog.Info("CleanOrphanedStatuses: starting cleanup")
+	
+	// Get all peers from database
+	dbPeers, err := c.db.GetAllPeers(ctx)
 	if err != nil {
-		slog.Error("failed to delete peer status for deleted peer", "peerIdentifier", peer.Identifier, "error", err)
-	} else {
-		slog.Debug("deleted peer status for deleted peer", "peerIdentifier", peer.Identifier)
+		slog.Warn("failed to fetch database peers for orphaned cleanup", "error", err)
+		return
 	}
 
-	// Remove metrics for the deleted peer
-	c.ms.UpdatePeerMetrics(&peer, domain.PeerStatus{
-		PeerId:      peer.Identifier,
-		IsConnected: false,
-		IsPingable:  false,
-	})
+	slog.Debug("CleanOrphanedStatuses: found DB peers", "count", len(dbPeers))
+
+	// Create map of valid peer IDs
+	validPeerMap := make(map[domain.PeerIdentifier]bool)
+	for _, peer := range dbPeers {
+		validPeerMap[peer.Identifier] = true
+	}
+
+	cleanedCount := 0
 	
-	slog.Debug("cleaned up metrics for deleted peer", "peerIdentifier", peer.Identifier)
+	// 1. Check peer_statuses table for orphaned records
+	allStatuses, err := c.db.GetAllPeerStatuses(ctx)
+	if err != nil {
+		slog.Warn("failed to fetch peer statuses for orphaned cleanup", "error", err)
+	} else {
+		slog.Debug("CleanOrphanedStatuses: found peer statuses", "count", len(allStatuses))
+		
+		for _, status := range allStatuses {
+			if !validPeerMap[status.PeerId] {
+				slog.Info("found orphaned peer status, cleaning up", "peer", status.PeerId)
+				
+				// Delete orphaned status from database
+				if err := c.db.DeletePeerStatus(ctx, status.PeerId); err != nil {
+					slog.Warn("failed to delete orphaned peer status", "peer", status.PeerId, "error", err)
+				}
+				
+				// Remove orphaned metrics from THIS node's registry
+				c.ms.RemovePeerMetricsByID(string(status.PeerId))
+				cleanedCount++
+			}
+		}
+	}
+	
+	// 2. Also check WireGuard interfaces for peers that shouldn't be there
+	// This catches cases where peer was removed but metrics still exist in memory
+	interfaces, err := c.db.GetAllInterfaces(ctx)
+	if err != nil {
+		slog.Warn("failed to fetch interfaces for orphaned cleanup", "error", err)
+	} else {
+		for _, iface := range interfaces {
+			wgPeers, err := c.wg.GetController(iface).GetPeers(ctx, iface.Identifier)
+			if err != nil {
+				slog.Debug("failed to fetch WireGuard peers for cleanup", "interface", iface.Identifier, "error", err)
+				continue
+			}
+
+			slog.Debug("CleanOrphanedStatuses: checking WireGuard peers", "interface", iface.Identifier, "count", len(wgPeers))
+
+			// Check each WireGuard peer - if it's not in DB, it's orphaned
+			for _, wgPeer := range wgPeers {
+				if !validPeerMap[wgPeer.Identifier] {
+					slog.Info("found orphaned peer in WireGuard, cleaning up metrics", "peer", wgPeer.Identifier, "interface", iface.Identifier)
+					
+					// Remove orphaned metrics (status was already cleaned above or doesn't exist)
+					c.ms.RemovePeerMetricsByID(string(wgPeer.Identifier))
+					cleanedCount++
+				}
+			}
+		}
+	}
+
+	if cleanedCount > 0 {
+		slog.Info("cleaned up orphaned peer statuses and metrics", "count", cleanedCount)
+	} else {
+		slog.Debug("CleanOrphanedStatuses: no orphaned peers found")
+	}
 }

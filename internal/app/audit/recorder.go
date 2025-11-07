@@ -73,6 +73,23 @@ func (r *Recorder) StartBackgroundJobs(ctx context.Context) {
 	}()
 }
 
+// logAuditEntry logs audit entry to console/file (structured logging)
+func (r *Recorder) logAuditEntry(entry *domain.AuditEntry) {
+	attrs := []any{
+		"timestamp", entry.CreatedAt.Format("2006-01-02 15:04:05"),
+		"user", entry.ContextUser,
+		"origin", entry.Origin,
+		"message", entry.Message,
+	}
+	
+	switch entry.Severity {
+	case domain.AuditSeverityLevelHigh:
+		slog.Warn("[AUDIT]", attrs...)
+	default:
+		slog.Info("[AUDIT]", attrs...)
+	}
+}
+
 func (r *Recorder) connectToMessageBus() error {
 	if !r.cfg.Statistics.CollectAuditData {
 		return nil // noting to do
@@ -95,7 +112,17 @@ func (r *Recorder) connectToMessageBus() error {
 }
 
 func (r *Recorder) handleAuthEvent(event domain.AuditEventWrapper[AuthEvent]) {
-	err := r.db.SaveAuditEntry(context.Background(), r.authEventToAuditEntry(event))
+	entry := r.authEventToAuditEntry(event)
+	
+	// Always log to console/file
+	r.logAuditEntry(entry)
+	
+	// Only save to database if configured
+	if !r.cfg.Statistics.StoreAuditData {
+		return
+	}
+	
+	err := r.db.SaveAuditEntry(context.Background(), entry)
 	if err != nil {
 		slog.Error("failed to create audit entry for auth event", "error", err)
 		return
@@ -103,7 +130,17 @@ func (r *Recorder) handleAuthEvent(event domain.AuditEventWrapper[AuthEvent]) {
 }
 
 func (r *Recorder) handleInterfaceEvent(event domain.AuditEventWrapper[InterfaceEvent]) {
-	err := r.db.SaveAuditEntry(context.Background(), r.interfaceEventToAuditEntry(event))
+	entry := r.interfaceEventToAuditEntry(event)
+	
+	// Always log to console/file
+	r.logAuditEntry(entry)
+	
+	// Only save to database if configured
+	if !r.cfg.Statistics.StoreAuditData {
+		return
+	}
+	
+	err := r.db.SaveAuditEntry(context.Background(), entry)
 	if err != nil {
 		slog.Error("failed to create audit entry for interface event", "error", err)
 		return
@@ -111,7 +148,17 @@ func (r *Recorder) handleInterfaceEvent(event domain.AuditEventWrapper[Interface
 }
 
 func (r *Recorder) handlePeerEvent(event domain.AuditEventWrapper[PeerEvent]) {
-	err := r.db.SaveAuditEntry(context.Background(), r.peerEventToAuditEntry(event))
+	entry := r.peerEventToAuditEntry(event)
+	
+	// Always log to console/file
+	r.logAuditEntry(entry)
+	
+	// Only save to database if configured
+	if !r.cfg.Statistics.StoreAuditData {
+		return
+	}
+	
+	err := r.db.SaveAuditEntry(context.Background(), entry)
 	if err != nil {
 		slog.Error("failed to create audit entry for peer event", "error", err)
 		return

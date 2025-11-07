@@ -133,6 +133,7 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 		f.bump("startup")
 	}
 
+	authConfigured := s.AuthHeader != "" && s.AuthValue != ""
 	slog.Info("[FANOUT] initialized",
 		"peers", len(s.Peers),
 		"topics", s.Topics,
@@ -140,6 +141,7 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 		"origin", s.Origin,
 		"debounce", s.Debounce.String(),
 		"timeout", s.Timeout.String(),
+		"auth_configured", authConfigured,
 	)
 }
 
@@ -234,6 +236,9 @@ func (f *fanout) fire(ctx context.Context) {
 
 			if f.cfg.AuthHeader != "" && f.cfg.AuthValue != "" {
 				req.Header.Set(f.cfg.AuthHeader, f.cfg.AuthValue)
+				slog.Debug("[FANOUT] adding auth header", "header", f.cfg.AuthHeader, "url", u)
+			} else {
+				slog.Warn("[FANOUT] no auth configured for request", "url", u)
 			}
 
 			req.Header.Set(hdrOrigin, f.cfg.Origin)
