@@ -643,12 +643,11 @@ func (r *SqlRepo) upsertPeer(ui *domain.ContextUserInfo, tx *gorm.DB, peer *doma
 // DeletePeer deletes the peer with the given id.
 func (r *SqlRepo) DeletePeer(ctx context.Context, id domain.PeerIdentifier) error {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		err := tx.Delete(&domain.PeerStatus{PeerId: id}).Error
-		if err != nil {
-			return err
-		}
+		// NOTE: We do NOT delete peer_status here.
+		// The peer_status will be cleaned up by CleanOrphanedStatuses on all cluster nodes.
+		// This ensures that other nodes can detect orphaned statuses and clean up their metrics.
 
-		err = tx.Select(clause.Associations).Delete(&domain.Peer{Identifier: id}).Error
+		err := tx.Select(clause.Associations).Delete(&domain.Peer{Identifier: id}).Error
 		if err != nil {
 			return err
 		}
@@ -1056,6 +1055,18 @@ func (r *SqlRepo) DeletePeerStatus(ctx context.Context, id domain.PeerIdentifier
 	}
 
 	return nil
+}
+
+// GetAllPeerStatuses returns all peer statuses from the database.
+func (r *SqlRepo) GetAllPeerStatuses(ctx context.Context) ([]domain.PeerStatus, error) {
+	var statuses []domain.PeerStatus
+
+	err := r.db.WithContext(ctx).Find(&statuses).Error
+	if err != nil {
+		return nil, err
+	}
+
+	return statuses, nil
 }
 
 // endregion statistics

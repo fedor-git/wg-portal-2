@@ -360,15 +360,20 @@ func (e PeerEndpoint) handleDelete() http.HandlerFunc {
 
 func (e PeerEndpoint) handleSyncPost() http.HandlerFunc {
     return func(w http.ResponseWriter, r *http.Request) {
+        slog.Info("/api/v1/peer/sync: received sync request")
         ctx := r.Context()
         if r.Header.Get("X-WGP-NoEcho") == "1" {
             ctx = app.WithNoFanout(ctx)
+            slog.Debug("/api/v1/peer/sync: NoEcho header detected, disabling fanout")
         }
         count, err := e.peers.SyncAllPeersFromDB(ctx)
         if err != nil { 
+            slog.Error("/api/v1/peer/sync: SyncAllPeersFromDB failed", "error", err)
             respond.JSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
             return
         }
+        
+        slog.Info("/api/v1/peer/sync: SyncAllPeersFromDB completed", "synced", count)
         
         // Force interface update events after sync, even with NoFanout
         // This ensures config files and routes are updated after peer sync

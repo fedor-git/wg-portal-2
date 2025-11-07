@@ -80,6 +80,7 @@ type Config struct {
 		CollectInterfaceData     bool          `yaml:"collect_interface_data"`
 		CollectPeerData          bool          `yaml:"collect_peer_data"`
 		CollectAuditData         bool          `yaml:"collect_audit_data"`
+		StoreAuditData           bool          `yaml:"store_audit_data"` // Store audit data in database
 		ListeningAddress         string        `yaml:"listening_address"`
 		ExportDetailedPeerMetrics bool         `yaml:"export_detailed_peer_metrics"`
 	} `yaml:"statistics"`
