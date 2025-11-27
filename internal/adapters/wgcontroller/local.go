@@ -491,6 +491,22 @@ func (c LocalController) getPeer(deviceId domain.InterfaceIdentifier, id domain.
 }
 
 func (c LocalController) updatePeer(deviceId domain.InterfaceIdentifier, pp *domain.PhysicalPeer) error {
+	allowedIPs := pp.GetAllowedIPs()
+	
+	slog.Debug("[updatePeer] Configuring peer",
+		"device", deviceId,
+		"peer", pp.Identifier,
+		"pp.AllowedIPs_count", len(pp.AllowedIPs),
+		"allowedIPs_count", len(allowedIPs))
+	
+	for i, ip := range pp.AllowedIPs {
+		slog.Debug("[updatePeer] pp.AllowedIPs", "index", i, "cidr", ip.String())
+	}
+	
+	for i, ip := range allowedIPs {
+		slog.Debug("[updatePeer] allowedIPs to ConfigureDevice", "index", i, "ipnet", ip.String())
+	}
+	
 	cfg := wgtypes.PeerConfig{
 		PublicKey:                   pp.GetPublicKey(),
 		Remove:                      false,
@@ -499,7 +515,7 @@ func (c LocalController) updatePeer(deviceId domain.InterfaceIdentifier, pp *dom
 		Endpoint:                    pp.GetEndpointAddress(),
 		PersistentKeepaliveInterval: pp.GetPersistentKeepaliveTime(),
 		ReplaceAllowedIPs:           true,
-		AllowedIPs:                  pp.GetAllowedIPs(),
+		AllowedIPs:                  allowedIPs,
 	}
 
 	err := c.wg.ConfigureDevice(string(deviceId), wgtypes.Config{ReplacePeers: false, Peers: []wgtypes.PeerConfig{cfg}})

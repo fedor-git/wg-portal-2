@@ -47,6 +47,11 @@ type Config struct {
 
 		ManageDns                   bool `yaml:"manage_dns"` // Controls if wg-portal should manage DNS via resolvconf
 		IgnoreMainDefaultRoute      bool `yaml:"ignore_main_default_route"`
+		
+		// ForceClientIPAsAllowedIP: When true, always use client's IP addresses as AllowedIPs on server side,
+		// ignoring any AllowedIPsStr from API/UI. This prevents overlapping AllowedIPs (like 0.0.0.0/0).
+		// Recommended: true for multi-client setups.
+		ForceClientIPAsAllowedIP    bool `yaml:"force_client_ip_as_allowed_ip"`
 
 		Fanout                       FanoutConfig `yaml:"fanout"`
 		DeleteExpiredPeers           bool          `yaml:"delete_expired_peers"` // Option to delete expired peers instead of disabling them.

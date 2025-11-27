@@ -76,7 +76,30 @@ func (m Manager) GetUserPeers(ctx context.Context, id domain.UserIdentifier) ([]
 		return nil, err
 	}
 
-	return m.db.GetUserPeers(ctx, id)
+	peers, err := m.db.GetUserPeers(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	// For API response: show AllowedIPs from interface config
+	// Get all interfaces to map InterfaceIdentifier -> PeerDefAllowedIPsStr
+	interfaces, err := m.db.GetAllInterfaces(ctx)
+	if err == nil {
+		ifaceMap := make(map[domain.InterfaceIdentifier]string)
+		for _, iface := range interfaces {
+			ifaceMap[iface.Identifier] = iface.PeerDefAllowedIPsStr
+		}
+		
+		for i := range peers {
+			if peers[i].Interface.Type == domain.InterfaceTypeClient {
+				if allowedIPs, ok := ifaceMap[peers[i].InterfaceIdentifier]; ok {
+					peers[i].AllowedIPsStr.Value = allowedIPs
+				}
+			}
+		}
+	}
+
+	return peers, nil
 }
 
 // PreparePeer prepares a new peer for the given interface with fresh keys and ip addresses.
@@ -119,6 +142,15 @@ func (m Manager) PreparePeer(ctx context.Context, id domain.InterfaceIdentifier)
 	}
 
 	peerId := domain.PeerIdentifier(kp.PublicKey)
+	
+	// For WireGuard kernel: use client's IP addresses (prevents overlapping AllowedIPs)
+	// Convert peer addresses to /32 (IPv4) or /128 (IPv6) host addresses
+	hostAddrs := make([]domain.Cidr, len(ips))
+	for i, ip := range ips {
+		hostAddrs[i] = ip.HostAddr()
+	}
+	peerAllowedIPs := domain.CidrsToString(hostAddrs)
+	
 	freshPeer := &domain.Peer{
 		BaseModel: domain.BaseModel{
 			CreatedBy: string(currentUser.Id),
@@ -128,7 +160,7 @@ func (m Manager) PreparePeer(ctx context.Context, id domain.InterfaceIdentifier)
 		},
 		Endpoint:            domain.NewConfigOption(iface.PeerDefEndpoint, true),
 		EndpointPublicKey:   domain.NewConfigOption(iface.PublicKey, true),
-		AllowedIPsStr:       domain.NewConfigOption(iface.PeerDefAllowedIPsStr, true),
+		AllowedIPsStr:       domain.NewConfigOption(peerAllowedIPs, true),
 		ExtraAllowedIPsStr:  "",
 		PresharedKey:        pk,
 		PersistentKeepalive: domain.NewConfigOption(iface.PeerDefPersistentKeepalive, true),
@@ -170,6 +202,27 @@ func (m Manager) GetPeer(ctx context.Context, id domain.PeerIdentifier) (*domain
 	if err := domain.ValidateUserAccessRights(ctx, peer.UserIdentifier); err != nil {
 		return nil, err
 	}
+
+	// For API response: show AllowedIPs from interface config (e.g., 0.0.0.0/0)
+	// instead of actual WireGuard kernel value (client's IP like 192.168.10.2/32)
+	iface, err := m.db.GetInterface(ctx, peer.InterfaceIdentifier)
+	slog.Debug("GetPeer before override",
+		"peer_id", peer.Identifier,
+		"peer_type", peer.Interface.Type,
+		"allowed_ips_before", peer.AllowedIPsStr.Value,
+		"iface_err", err)
+	
+	if err == nil && peer.Interface.Type == domain.InterfaceTypeClient {
+		slog.Debug("GetPeer overriding AllowedIPsStr",
+			"peer_id", peer.Identifier,
+			"old_value", peer.AllowedIPsStr.Value,
+			"new_value", iface.PeerDefAllowedIPsStr)
+		peer.AllowedIPsStr.Value = iface.PeerDefAllowedIPsStr
+	}
+	
+	slog.Debug("GetPeer after override",
+		"peer_id", peer.Identifier,
+		"allowed_ips_after", peer.AllowedIPsStr.Value)
 
 	return peer, nil
 }
@@ -451,13 +504,13 @@ func (m Manager) savePeers(ctx context.Context, peers ...*domain.Peer) error {
 
 			err := m.wg.GetController(*iface).SavePeer(ctx, peer.InterfaceIdentifier, peer.Identifier,
 				func(pp *domain.PhysicalPeer) (*domain.PhysicalPeer, error) {
-					domain.MergeToPhysicalPeer(pp, peer)
+					domain.MergeToPhysicalPeer(pp, peer, m.cfg.Core.ForceClientIPAsAllowedIP)
 					return pp, nil
 				})
 			if err != nil {
 				return nil, fmt.Errorf("failed to save wireguard peer %s: %w", peer.Identifier, err)
 			}
-
+			
 			return peer, nil
 		})
 		if err != nil {

@@ -30,8 +30,13 @@ type ProvisioningEndpointProvisioningService interface {
 	GetConfig() *config.Config
 }
 
+type ProvisioningEndpointInterfaceService interface {
+	GetById(ctx context.Context, id domain.InterfaceIdentifier) (*domain.Interface, []domain.Peer, error)
+}
+
 type ProvisioningEndpoint struct {
 	provisioning  ProvisioningEndpointProvisioningService
+	interfaces    ProvisioningEndpointInterfaceService
 	authenticator Authenticator
 	validator     Validator
 	bus           app.EventPublisher
@@ -41,18 +46,32 @@ func NewProvisioningEndpoint(
 	authenticator Authenticator,
 	validator Validator,
 	provisioning ProvisioningEndpointProvisioningService,
+	interfaces ProvisioningEndpointInterfaceService,
 	bus app.EventPublisher,
 ) *ProvisioningEndpoint {
 	return &ProvisioningEndpoint{
 		authenticator: authenticator,
 		validator:     validator,
 		provisioning:  provisioning,
+		interfaces:    interfaces,
 		bus:           bus,
 	}
 }
 
 func (e ProvisioningEndpoint) GetName() string {
 	return "ProvisioningEndpoint"
+}
+
+// overrideAllowedIPsForAPI replaces peer's AllowedIPsStr with interface config for API response
+func (e ProvisioningEndpoint) overrideAllowedIPsForAPI(ctx context.Context, peer *domain.Peer) {
+	if peer == nil || peer.Interface.Type != domain.InterfaceTypeClient {
+		return
+	}
+	
+	iface, _, err := e.interfaces.GetById(ctx, peer.InterfaceIdentifier)
+	if err == nil {
+		peer.AllowedIPsStr.Value = iface.PeerDefAllowedIPsStr
+	}
 }
 
 func (e ProvisioningEndpoint) RegisterRoutes(g *routegroup.Bundle) {
@@ -225,6 +244,7 @@ func (e ProvisioningEndpoint) handleNewPeerPost() http.HandlerFunc {
 			return
 		}
 		if existingPeer != nil {
+			e.overrideAllowedIPsForAPI(r.Context(), existingPeer)
 			respond.JSON(w, http.StatusOK, models.NewPeer(existingPeer))
 			return
 		}
@@ -240,6 +260,7 @@ func (e ProvisioningEndpoint) handleNewPeerPost() http.HandlerFunc {
 			e.bus.Publish("peers.updated", "provisioning:new-peer")
 		}
 
+		e.overrideAllowedIPsForAPI(r.Context(), peer)
 		respond.JSON(w, http.StatusOK, models.NewPeer(peer))
 	}
 }
