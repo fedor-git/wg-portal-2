@@ -297,7 +297,7 @@ func (m Manager) RestoreInterfaceState(
 			default: // update peer
 				err := m.wg.GetController(iface).SavePeer(ctx, iface.Identifier, peer.Identifier,
 					func(pp *domain.PhysicalPeer) (*domain.PhysicalPeer, error) {
-						domain.MergeToPhysicalPeer(pp, &peer)
+						domain.MergeToPhysicalPeer(pp, &peer, m.cfg.Core.ForceClientIPAsAllowedIP)
 						return pp, nil
 					})
 				if err != nil {
@@ -589,7 +589,7 @@ func (m Manager) saveInterface(ctx context.Context, iface *domain.Interface) (
 		for _, peer := range peers {
 			saveErr := m.wg.GetController(*iface).SavePeer(ctx, iface.Identifier, peer.Identifier,
 				func(pp *domain.PhysicalPeer) (*domain.PhysicalPeer, error) {
-					domain.MergeToPhysicalPeer(pp, &peer)
+					domain.MergeToPhysicalPeer(pp, &peer, m.cfg.Core.ForceClientIPAsAllowedIP)
 					return pp, nil
 				})
 			if saveErr != nil {

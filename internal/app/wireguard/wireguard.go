@@ -3,7 +3,6 @@ package wireguard
 import (
 	"context"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -516,28 +515,9 @@ func (m Manager) handlePeerInterfaceUpdatedEvent(interfaceId domain.InterfaceIde
 		// Peer is enabled, make sure it exists in WireGuard with correct configuration
 		slog.Debug("syncing peer in WireGuard device", "interface", interfaceId, "peer", dbPeer.Identifier)
 		err := localController.SavePeer(ctx, interfaceId, dbPeer.Identifier, func(pp *domain.PhysicalPeer) (*domain.PhysicalPeer, error) {
-			// Convert domain.Peer to domain.PhysicalPeer format
-			pp.Identifier = dbPeer.Identifier
-			pp.Endpoint = dbPeer.Endpoint.Value
-			
-			// Parse allowed IPs
-			allowedIPs := []domain.Cidr{}
-			if dbPeer.AllowedIPsStr.Value != "" {
-				for _, ip := range strings.Split(dbPeer.AllowedIPsStr.Value, ",") {
-					trimmedIP := strings.TrimSpace(ip)
-					if trimmedIP != "" {
-						cidr, err := domain.CidrFromString(trimmedIP)
-						if err == nil {
-							allowedIPs = append(allowedIPs, cidr)
-						}
-					}
-				}
-			}
-			pp.AllowedIPs = allowedIPs
-			
-			pp.PresharedKey = dbPeer.PresharedKey
-			pp.PersistentKeepalive = dbPeer.PersistentKeepalive.Value
-			
+			// Use MergeToPhysicalPeer to properly convert domain.Peer to PhysicalPeer
+			// This respects the ForceClientIPAsAllowedIP config setting
+			domain.MergeToPhysicalPeer(pp, &dbPeer, m.cfg.Core.ForceClientIPAsAllowedIP)
 			return pp, nil
 		})
 		if err != nil {
