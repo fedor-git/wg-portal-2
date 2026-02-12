@@ -163,8 +163,11 @@ func defaultConfig() *Config {
 	cfg.Core.DefaultUserTTL = "30d" // Default to 30 days
 
 	cfg.Database = DatabaseConfig{
-		Type: "sqlite",
-		DSN:  "data/sqlite.db",
+		Type:                      "sqlite",
+		DSN:                       "data/sqlite.db",
+		MaxOpenConnections:        50,
+		MaxIdleConnections:        10,
+		ConnectionMaxLifetime:     3 * time.Minute,
 	}
 
 	cfg.Backend = Backend{
