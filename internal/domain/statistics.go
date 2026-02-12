@@ -19,6 +19,11 @@ type PeerStatus struct {
 	LastHandshake    *time.Time `gorm:"column:last_handshake" json:"LastHandshake"`
 	Endpoint         string     `gorm:"column:endpoint" json:"Endpoint"`
 	LastSessionStart *time.Time `gorm:"column:last_session_start" json:"LastSessionStart"`
+
+	// Ownership tracking for cluster coordination
+	// OwnerNodeId identifies which cluster node owns this peer status
+	// Only the owner node should update the peer status, others read-only
+	OwnerNodeId string `gorm:"column:owner_node_id;index" json:"-"`
 }
 
 func (s *PeerStatus) CalcConnected() {

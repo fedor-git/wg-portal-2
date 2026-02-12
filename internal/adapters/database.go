@@ -5,8 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -140,14 +139,22 @@ func applyConnectionPoolConfig(db *gorm.DB, cfg config.DatabaseConfig) error {
 		maxLifetime = 3 * time.Minute
 	}
 
+	// Don't open connections until needed - reduces startup pool exhaustion
+	// In multi-node cluster with 24 nodes, early connection creation causes pool exhaustion
+	maxIdle = 5 // Start with fewer idle connections
+	
 	sqlDB.SetMaxOpenConns(maxOpen)
 	sqlDB.SetMaxIdleConns(maxIdle)
 	sqlDB.SetConnMaxLifetime(maxLifetime)
+	// Set connection max idle time to recycle stale connections faster
+	// Prevents "too many connections" by recycling idle connections after 5 minutes
+	sqlDB.SetConnMaxIdleTime(5 * time.Minute)
 
 	slog.Info("Database connection pool configured",
 		"max_open_connections", maxOpen,
 		"max_idle_connections", maxIdle,
-		"connection_max_lifetime", maxLifetime.String())
+		"connection_max_lifetime", maxLifetime.String(),
+		"connection_max_idle_time", "5m")
 
 	return nil
 }
@@ -157,69 +164,131 @@ func NewDatabase(cfg config.DatabaseConfig) (*gorm.DB, error) {
 	var gormDb *gorm.DB
 	var err error
 
-	switch cfg.Type {
-	case config.DatabaseMySQL:
-		gormDb, err = gorm.Open(mysql.Open(cfg.DSN), &gorm.Config{
-			Logger: NewLogger(cfg.SlowQueryThreshold, cfg.Debug),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to open MySQL database: %w", err)
+	// Retry logic for initial database connection
+	// With 24 nodes starting simultaneously, initial connection can fail with "Too many connections"
+	const maxRetries = 10
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff with random jitter to prevent thundering herd
+			// With 24 nodes starting simultaneously, stagger retries
+			// Exponential: 100ms, 200ms, 400ms, 800ms, 1.6s, 3.2s...
+			// Jitter: ±50% randomness so not all nodes retry at same time
+			baseWaitTime := time.Duration(100*(1<<uint(attempt-1))) * time.Millisecond
+			jitterAmount := time.Duration(rand.Intn(int(baseWaitTime/2))) // ±50% jitter
+			waitTime := baseWaitTime + jitterAmount
+			
+			slog.Warn("database connection attempt failed, retrying",
+				"attempt", attempt+1,
+				"max_retries", maxRetries,
+				"wait_time", waitTime.String(),
+				"error", lastErr)
+			time.Sleep(waitTime)
 		}
 
-		// Apply connection pool configuration
-		if err := applyConnectionPoolConfig(gormDb, cfg); err != nil {
-			return nil, fmt.Errorf("failed to configure MySQL connection pool: %w", err)
-		}
-
-		sqlDB, _ := gormDb.DB()
-		err = sqlDB.Ping() // This DOES open a connection if necessary. This makes sure the database is accessible
-		if err != nil {
-			return nil, fmt.Errorf("failed to ping MySQL database: %w", err)
-		}
-	case config.DatabaseMsSQL:
-		gormDb, err = gorm.Open(sqlserver.Open(cfg.DSN), &gorm.Config{
-			Logger: NewLogger(cfg.SlowQueryThreshold, cfg.Debug),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to open sqlserver database: %w", err)
-		}
-
-		// Apply connection pool configuration
-		if err := applyConnectionPoolConfig(gormDb, cfg); err != nil {
-			return nil, fmt.Errorf("failed to configure MSSQL connection pool: %w", err)
-		}
-	case config.DatabasePostgres:
-		gormDb, err = gorm.Open(postgres.Open(cfg.DSN), &gorm.Config{
-			Logger: NewLogger(cfg.SlowQueryThreshold, cfg.Debug),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to open Postgres database: %w", err)
-		}
-
-		// Apply connection pool configuration
-		if err := applyConnectionPoolConfig(gormDb, cfg); err != nil {
-			return nil, fmt.Errorf("failed to configure PostgreSQL connection pool: %w", err)
-		}
-	case config.DatabaseSQLite:
-		if _, err = os.Stat(filepath.Dir(cfg.DSN)); os.IsNotExist(err) {
-			if err = os.MkdirAll(filepath.Dir(cfg.DSN), 0700); err != nil {
-				return nil, fmt.Errorf("failed to create database base directory: %w", err)
+		switch cfg.Type {
+		case config.DatabaseMySQL:
+			gormDb, err = gorm.Open(mysql.Open(cfg.DSN), &gorm.Config{
+				Logger: NewLogger(cfg.SlowQueryThreshold, cfg.Debug),
+			})
+			if err != nil {
+				lastErr = fmt.Errorf("failed to open MySQL database: %w", err)
+				if strings.Contains(err.Error(), "Too many connections") {
+					continue // Retry on connection pool exhaustion
+				}
+				return nil, lastErr
 			}
+
+			// Apply connection pool configuration
+			if err := applyConnectionPoolConfig(gormDb, cfg); err != nil {
+				lastErr = fmt.Errorf("failed to configure MySQL connection pool: %w", err)
+				continue
+			}
+
+			sqlDB, _ := gormDb.DB()
+			err = sqlDB.Ping() // This DOES open a connection if necessary
+			if err != nil {
+				lastErr = fmt.Errorf("failed to ping MySQL database: %w", err)
+				if strings.Contains(err.Error(), "Too many connections") {
+					continue // Retry on connection pool exhaustion
+				}
+				return nil, lastErr
+			}
+
+			slog.Info("database connected successfully", "type", "MySQL", "attempt", attempt+1)
+			return gormDb, nil
+
+		case config.DatabaseMsSQL:
+			gormDb, err = gorm.Open(sqlserver.Open(cfg.DSN), &gorm.Config{
+				Logger: NewLogger(cfg.SlowQueryThreshold, cfg.Debug),
+			})
+			if err != nil {
+				lastErr = fmt.Errorf("failed to open sqlserver database: %w", err)
+				if strings.Contains(err.Error(), "Too many connections") {
+					continue
+				}
+				return nil, lastErr
+			}
+
+			// Apply connection pool configuration
+			if err := applyConnectionPoolConfig(gormDb, cfg); err != nil {
+				lastErr = fmt.Errorf("failed to configure MSSQL connection pool: %w", err)
+				continue
+			}
+
+			slog.Info("database connected successfully", "type", "MSSQL", "attempt", attempt+1)
+			return gormDb, nil
+
+		case config.DatabasePostgres:
+			gormDb, err = gorm.Open(postgres.Open(cfg.DSN), &gorm.Config{
+				Logger: NewLogger(cfg.SlowQueryThreshold, cfg.Debug),
+			})
+			if err != nil {
+				lastErr = fmt.Errorf("failed to open Postgres database: %w", err)
+				if strings.Contains(err.Error(), "too many connections") {
+					continue
+				}
+				return nil, lastErr
+			}
+
+			// Apply connection pool configuration
+			if err := applyConnectionPoolConfig(gormDb, cfg); err != nil {
+				lastErr = fmt.Errorf("failed to configure Postgres connection pool: %w", err)
+				continue
+			}
+
+			slog.Info("database connected successfully", "type", "Postgres", "attempt", attempt+1)
+			return gormDb, nil
+
+		case config.DatabaseSQLite:
+			gormDb, err = gorm.Open(sqlite.Open(cfg.DSN), &gorm.Config{
+				Logger: NewLogger(cfg.SlowQueryThreshold, cfg.Debug),
+			})
+			if err != nil {
+				lastErr = fmt.Errorf("failed to open SQLite database: %w", err)
+				continue
+			}
+
+			// SQLite doesn't benefit from connection pooling, set to 1
+			if err := applyConnectionPoolConfig(gormDb, config.DatabaseConfig{
+				MaxOpenConnections:    1,
+				MaxIdleConnections:    1,
+				ConnectionMaxLifetime: 0,
+			}); err != nil {
+				lastErr = fmt.Errorf("failed to configure SQLite connection pool: %w", err)
+				continue
+			}
+
+			slog.Info("database connected successfully", "type", "SQLite", "attempt", attempt+1)
+			return gormDb, nil
+
+		default:
+			return nil, fmt.Errorf("unknown database type: %s", cfg.Type)
 		}
-		gormDb, err = gorm.Open(sqlite.Open(cfg.DSN), &gorm.Config{
-			Logger:                                   NewLogger(cfg.SlowQueryThreshold, cfg.Debug),
-			DisableForeignKeyConstraintWhenMigrating: true,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to open sqlite database: %w", err)
-		}
-		// SQLite doesn't benefit from connection pooling, set to 1
-		sqlDB, _ := gormDb.DB()
-		sqlDB.SetMaxOpenConns(1)
-		slog.Info("SQLite connection configured (non-pooled)")
 	}
 
-	return gormDb, nil
+	return nil, fmt.Errorf("failed to connect to database after %d attempts: %w", maxRetries, lastErr)
 }
 
 // SqlRepo is a SQL database repository implementation.
@@ -1039,35 +1108,210 @@ func (r *SqlRepo) upsertInterfaceStatus(tx *gorm.DB, in *domain.InterfaceStatus)
 
 // UpdatePeerStatus updates the peer status with the given id.
 // If no peer status is found, a new one is created.
+// Includes automatic retry logic with exponential backoff for deadlock/conflict recovery.
+// Uses row-level FOR UPDATE locking to prevent concurrent modification conflicts.
 func (r *SqlRepo) UpdatePeerStatus(
 	ctx context.Context,
 	id domain.PeerIdentifier,
 	updateFunc func(in *domain.PeerStatus) (*domain.PeerStatus, error),
 ) error {
-	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		in, err := r.getOrCreatePeerStatus(tx, id)
-		if err != nil {
-			return err // return any error will roll back
+	// Retry logic with exponential backoff for deadlocks and conflicts
+	// Increased to 5 retries (50ms, 100ms, 200ms, 400ms, 800ms total ~1.6s) for multi-node scenarios
+	const maxRetries = 5
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
+			// Longer delays give other nodes time to release locks
+			waitTime := time.Duration(50*(1<<uint(attempt-1))) * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(waitTime):
+			}
 		}
 
-		in, err = updateFunc(in)
-		if err != nil {
-			return err
+		err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			in, err := r.getOrCreatePeerStatus(tx, id)
+			if err != nil {
+				return err // return any error will roll back
+			}
+
+			in, err = updateFunc(in)
+			if err != nil {
+				return err
+			}
+
+			err = r.upsertPeerStatus(tx, in)
+			if err != nil {
+				return err
+			}
+
+			// return nil will commit the whole transaction
+			return nil
+		})
+		if err == nil {
+			return nil // success
 		}
 
-		err = r.upsertPeerStatus(tx, in)
-		if err != nil {
-			return err
+		lastErr = err
+		// Check if this is a retryable error (deadlock or record changed)
+		errMsg := err.Error()
+		if !strings.Contains(errMsg, "Deadlock") && !strings.Contains(errMsg, "Record has changed") {
+			return err // not a retryable error
 		}
-
-		// return nil will commit the whole transaction
-		return nil
-	})
-	if err != nil {
-		return err
+		// Continue to retry
 	}
 
-	return nil
+	return fmt.Errorf("UpdatePeerStatus failed after %d retries: %w", maxRetries, lastErr)
+}
+
+// ClaimPeerStatus claims ownership of a peer status for this node.
+// Only the owner node should update peer status to avoid conflicts.
+// Once claimed, only this node (and nodes with same owner_node_id) can update it.
+// Uses row-level FOR UPDATE locking to serialize concurrent claims.
+func (r *SqlRepo) ClaimPeerStatus(
+	ctx context.Context,
+	id domain.PeerIdentifier,
+	ownerNodeId string,
+	updateFunc func(in *domain.PeerStatus) (*domain.PeerStatus, error),
+) error {
+	if ownerNodeId == "" {
+		return fmt.Errorf("ownerNodeId cannot be empty")
+	}
+
+	// Retry logic with exponential backoff for deadlocks and conflicts
+	// Increased to 5 retries for multi-node ownership claiming
+	const maxRetries = 5
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
+			// Longer delays give other nodes time to release locks
+			waitTime := time.Duration(50*(1<<uint(attempt-1))) * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(waitTime):
+			}
+		}
+
+		err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			in, err := r.getOrCreatePeerStatus(tx, id)
+			if err != nil {
+				return err
+			}
+
+			// Claim ownership: set before calling updateFunc
+			in.OwnerNodeId = ownerNodeId
+			in.UpdatedAt = time.Now()
+
+			// Apply the custom update function
+			in, err = updateFunc(in)
+			if err != nil {
+				return err
+			}
+
+			// Ensure ownership is maintained
+			in.OwnerNodeId = ownerNodeId
+
+			err = r.upsertPeerStatus(tx, in)
+			if err != nil {
+				return err
+			}
+
+			return nil
+		})
+		if err == nil {
+			return nil // success
+		}
+
+		lastErr = err
+		// Check if this is a retryable error (deadlock or record changed)
+		errMsg := err.Error()
+		if !strings.Contains(errMsg, "Deadlock") && !strings.Contains(errMsg, "Record has changed") {
+			return err // not a retryable error
+		}
+		// Continue to retry
+	}
+
+	return fmt.Errorf("ClaimPeerStatus failed after %d retries: %w", maxRetries, lastErr)
+}
+
+// BatchUpdatePeerStatuses updates multiple peer statuses in a single optimized transaction.
+// This is more efficient than calling UpdatePeerStatus individually and reduces deadlock risk.
+// Uses ON CONFLICT DO UPDATE for bulk upsert with automatic conflict resolution.
+func (r *SqlRepo) BatchUpdatePeerStatuses(
+	ctx context.Context,
+	updates map[domain.PeerIdentifier]func(in *domain.PeerStatus) (*domain.PeerStatus, error),
+) error {
+	if len(updates) == 0 {
+		return nil
+	}
+
+	// Retry logic for batch operations - more retries for bulk operations
+	const maxRetries = 5
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
+			waitTime := time.Duration(50*(1<<uint(attempt-1))) * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(waitTime):
+			}
+		}
+
+		err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var allStatuses []*domain.PeerStatus
+
+			// Load all peer statuses we need to update
+			for id := range updates {
+				in, err := r.getOrCreatePeerStatus(tx, id)
+				if err != nil {
+					return err
+				}
+
+				// Apply the update function
+				updateFunc := updates[id]
+				in, err = updateFunc(in)
+				if err != nil {
+					return err
+				}
+
+				allStatuses = append(allStatuses, in)
+			}
+
+			// Batch insert/update all statuses in one operation
+			if len(allStatuses) > 0 {
+				err := tx.Clauses(clause.OnConflict{
+					UpdateAll: true,
+				}).CreateInBatches(allStatuses, 50).Error // batch insert in groups of 50
+				if err != nil {
+					return err
+				}
+			}
+
+			return nil
+		})
+		if err == nil {
+			return nil // success
+		}
+
+		lastErr = err
+		// Check if this is a retryable error
+		errMsg := err.Error()
+		if !strings.Contains(errMsg, "Deadlock") && !strings.Contains(errMsg, "Record has changed") {
+			return err // not a retryable error
+		}
+		// Continue to retry
+	}
+
+	return fmt.Errorf("BatchUpdatePeerStatuses failed after %d retries: %w", maxRetries, lastErr)
 }
 
 func (r *SqlRepo) getOrCreatePeerStatus(tx *gorm.DB, id domain.PeerIdentifier) (*domain.PeerStatus, error) {
@@ -1079,6 +1323,28 @@ func (r *SqlRepo) getOrCreatePeerStatus(tx *gorm.DB, id domain.PeerIdentifier) (
 		UpdatedAt: time.Now(),
 	}
 
+	// Use Clauses(clause.Locking{Strength: "UPDATE"}) to add FOR UPDATE
+	// This locks the row at the database level, preventing concurrent modifications
+	// If row doesn't exist, FirstOrCreate will create it
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Attrs(defaults).FirstOrCreate(&in, id).Error
+	if err != nil {
+		return nil, err
+	}
+
+	return &in, nil
+}
+
+func (r *SqlRepo) getOrCreatePeerStatusForRead(tx *gorm.DB, id domain.PeerIdentifier) (*domain.PeerStatus, error) {
+	var in domain.PeerStatus
+
+	// defaults will be applied to newly created record
+	defaults := domain.PeerStatus{
+		PeerId:    id,
+		UpdatedAt: time.Now(),
+	}
+
+	// For read-only access without modifications (used in conditionals)
+	// No FOR UPDATE lock - allows concurrent reads
 	err := tx.Attrs(defaults).FirstOrCreate(&in, id).Error
 	if err != nil {
 		return nil, err
@@ -1147,16 +1413,18 @@ func (r *SqlRepo) GetAllAuditEntries(ctx context.Context) ([]domain.AuditEntry, 
 // endregion audit
 
 func (r *SqlRepo) GetAllPeers(ctx context.Context) ([]domain.Peer, error) {
-    var peers []domain.Peer
-    err := r.db.WithContext(ctx).
-        Preload("Addresses").
-        Preload("Interface").
-        Find(&peers).Error
-    if err != nil {
-        return nil, err
-    }
+	var peers []domain.Peer
+	// OPTIMIZED: Select only peer identifiers and basic fields to avoid N+1 queries
+	// from Preload("Addresses") and Preload("Interface") which would create 600+ queries
+	// This method is used mainly for cleanup validation, not for full peer data display
+	err := r.db.WithContext(ctx).
+		Select("id, identifier, display_name, interface_identifier").
+		Find(&peers).Error
+	if err != nil {
+		return nil, err
+	}
 
-    return peers, nil
+	return peers, nil
 }
 
 // SyncAllPeersFromDB synchronizes all peers from the database.

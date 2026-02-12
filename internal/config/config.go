@@ -11,20 +11,20 @@ import (
 )
 
 type FanoutConfig struct {
-	Enabled            bool          `yaml:"enabled"`
-	Peers              []string      `yaml:"peers"`
-	AuthHeader         string        `yaml:"auth_header"`
-	AuthValue          string        `yaml:"auth_value"`
-	Timeout            time.Duration `yaml:"timeout"`
-	Debounce           time.Duration `yaml:"debounce"`
-	SelfURL            string        `yaml:"self_url"`
-	Origin             string        `yaml:"origin" mapstructure:"origin"`
-	KickOnStart        bool          `yaml:"kick_on_start" mapstructure:"kick_on_start"`
-	Topics             []string      `yaml:"topics" mapstructure:"topics"`
-	TLSSkipVerify      bool          `yaml:"tls_skip_verify"`
-	TLSClientCertFile  string        `yaml:"tls_client_cert_file"`
-	TLSClientKeyFile   string        `yaml:"tls_client_key_file"`
-	TLSCACertFile      string        `yaml:"tls_ca_cert_file"`
+	Enabled           bool          `yaml:"enabled"`
+	Peers             []string      `yaml:"peers"`
+	AuthHeader        string        `yaml:"auth_header"`
+	AuthValue         string        `yaml:"auth_value"`
+	Timeout           time.Duration `yaml:"timeout"`
+	Debounce          time.Duration `yaml:"debounce"`
+	SelfURL           string        `yaml:"self_url"`
+	Origin            string        `yaml:"origin" mapstructure:"origin"`
+	KickOnStart       bool          `yaml:"kick_on_start" mapstructure:"kick_on_start"`
+	Topics            []string      `yaml:"topics" mapstructure:"topics"`
+	TLSSkipVerify     bool          `yaml:"tls_skip_verify"`
+	TLSClientCertFile string        `yaml:"tls_client_cert_file"`
+	TLSClientKeyFile  string        `yaml:"tls_client_key_file"`
+	TLSCACertFile     string        `yaml:"tls_ca_cert_file"`
 }
 
 // Config is the main configuration struct.
@@ -45,17 +45,22 @@ type Config struct {
 		RestoreState                bool `yaml:"restore_state"`
 		SyncOnStartup               bool `mapstructure:"sync_on_startup" yaml:"sync_on_startup" env:"WG_SYNC_ON_STARTUP"`
 
-		ManageDns                   bool `yaml:"manage_dns"` // Controls if wg-portal should manage DNS via resolvconf
-		IgnoreMainDefaultRoute      bool `yaml:"ignore_main_default_route"`
-		
+		ManageDns              bool `yaml:"manage_dns"` // Controls if wg-portal should manage DNS via resolvconf
+		IgnoreMainDefaultRoute bool `yaml:"ignore_main_default_route"`
+
+		// ClusterNodeId uniquely identifies this node in a multi-node cluster
+		// Used for peer status ownership coordination (only owner node updates status)
+		// Auto-set from POD_NAME, HOSTNAME env vars, or hostname syscall
+		ClusterNodeId string `yaml:"cluster_node_id" env:"CLUSTER_NODE_ID,POD_NAME,HOSTNAME"`
+
 		// ForceClientIPAsAllowedIP: When true, always use client's IP addresses as AllowedIPs on server side,
 		// ignoring any AllowedIPsStr from API/UI. This prevents overlapping AllowedIPs (like 0.0.0.0/0).
 		// Recommended: true for multi-client setups.
-		ForceClientIPAsAllowedIP    bool `yaml:"force_client_ip_as_allowed_ip"`
+		ForceClientIPAsAllowedIP bool `yaml:"force_client_ip_as_allowed_ip"`
 
-		Fanout                       FanoutConfig `yaml:"fanout"`
-		DeleteExpiredPeers           bool          `yaml:"delete_expired_peers"` // Option to delete expired peers instead of disabling them.
-		DefaultUserTTL               string        `yaml:"default_user_ttl"` // Default TTL (e.g., "24h", "7d", "30d") for new users.
+		Fanout             FanoutConfig `yaml:"fanout"`
+		DeleteExpiredPeers bool         `yaml:"delete_expired_peers"` // Option to delete expired peers instead of disabling them.
+		DefaultUserTTL     string       `yaml:"default_user_ttl"`     // Default TTL (e.g., "24h", "7d", "30d") for new users.
 	} `yaml:"core"`
 
 	Advanced struct {
@@ -77,17 +82,17 @@ type Config struct {
 	Backend Backend `yaml:"backend"`
 
 	Statistics struct {
-		UsePingChecks            bool          `yaml:"use_ping_checks"`
-		PingCheckWorkers         int           `yaml:"ping_check_workers"`
-		PingUnprivileged         bool          `yaml:"ping_unprivileged"`
-		PingCheckInterval        time.Duration `yaml:"ping_check_interval"`
-		DataCollectionInterval   time.Duration `yaml:"data_collection_interval"`
-		CollectInterfaceData     bool          `yaml:"collect_interface_data"`
-		CollectPeerData          bool          `yaml:"collect_peer_data"`
-		CollectAuditData         bool          `yaml:"collect_audit_data"`
-		StoreAuditData           bool          `yaml:"store_audit_data"` // Store audit data in database
-		ListeningAddress         string        `yaml:"listening_address"`
-		ExportDetailedPeerMetrics bool         `yaml:"export_detailed_peer_metrics"`
+		UsePingChecks             bool          `yaml:"use_ping_checks"`
+		PingCheckWorkers          int           `yaml:"ping_check_workers"`
+		PingUnprivileged          bool          `yaml:"ping_unprivileged"`
+		PingCheckInterval         time.Duration `yaml:"ping_check_interval"`
+		DataCollectionInterval    time.Duration `yaml:"data_collection_interval"`
+		CollectInterfaceData      bool          `yaml:"collect_interface_data"`
+		CollectPeerData           bool          `yaml:"collect_peer_data"`
+		CollectAuditData          bool          `yaml:"collect_audit_data"`
+		StoreAuditData            bool          `yaml:"store_audit_data"` // Store audit data in database
+		ListeningAddress          string        `yaml:"listening_address"`
+		ExportDetailedPeerMetrics bool          `yaml:"export_detailed_peer_metrics"`
 	} `yaml:"statistics"`
 
 	Mail MailConfig `yaml:"mail"`
@@ -163,11 +168,11 @@ func defaultConfig() *Config {
 	cfg.Core.DefaultUserTTL = "30d" // Default to 30 days
 
 	cfg.Database = DatabaseConfig{
-		Type:                      "sqlite",
-		DSN:                       "data/sqlite.db",
-		MaxOpenConnections:        50,
-		MaxIdleConnections:        10,
-		ConnectionMaxLifetime:     3 * time.Minute,
+		Type:                  "sqlite",
+		DSN:                   "data/sqlite.db",
+		MaxOpenConnections:    150,
+		MaxIdleConnections:    30,
+		ConnectionMaxLifetime: 3 * time.Minute,
 	}
 
 	cfg.Backend = Backend{
@@ -197,7 +202,7 @@ func defaultConfig() *Config {
 	cfg.Advanced.LimitAdditionalUserPeers = 0
 
 	cfg.Statistics.UsePingChecks = true
-	cfg.Statistics.PingCheckWorkers = 10
+	cfg.Statistics.PingCheckWorkers = 3
 	cfg.Statistics.PingUnprivileged = false
 	cfg.Statistics.PingCheckInterval = 1 * time.Minute
 	cfg.Statistics.DataCollectionInterval = 1 * time.Minute
@@ -252,6 +257,28 @@ func GetConfig() (*Config, error) {
 	if err := loadConfigFile(cfg, cfgFileName); err != nil {
 		return nil, fmt.Errorf("failed to load config from yaml: %w", err)
 	}
+
+	// Load ClusterNodeId from environment variables if not set in config YAML
+	// Priority: CLUSTER_NODE_ID > POD_NAME > HOSTNAME > hostname syscall
+	if cfg.Core.ClusterNodeId == "" {
+		if clusterNodeId := os.Getenv("CLUSTER_NODE_ID"); clusterNodeId != "" {
+			cfg.Core.ClusterNodeId = clusterNodeId
+		} else if podName := os.Getenv("POD_NAME"); podName != "" {
+			cfg.Core.ClusterNodeId = podName
+		} else if hostname := os.Getenv("HOSTNAME"); hostname != "" {
+			cfg.Core.ClusterNodeId = hostname
+		} else {
+			// Fall back to hostname syscall if all environment variables are empty
+			h, err := os.Hostname()
+			if err == nil && h != "" {
+				cfg.Core.ClusterNodeId = h
+			} else {
+				// Default fallback
+				cfg.Core.ClusterNodeId = "node-unknown"
+			}
+		}
+	}
+	slog.Info("ClusterNodeId configured", "id", cfg.Core.ClusterNodeId)
 
 	cfg.Web.Sanitize()
 	err := cfg.Backend.Validate()

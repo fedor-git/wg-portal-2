@@ -69,6 +69,16 @@ func (m *MockDB) UpdatePeerStatus(ctx context.Context, id domain.PeerIdentifier,
 	return args.Error(0)
 }
 
+func (m *MockDB) ClaimPeerStatus(ctx context.Context, id domain.PeerIdentifier, ownerNodeId string, updateFunc func(*domain.PeerStatus) (*domain.PeerStatus, error)) error {
+	args := m.Called(ctx, id, ownerNodeId, updateFunc)
+	return args.Error(0)
+}
+
+func (m *MockDB) BatchUpdatePeerStatuses(ctx context.Context, updates map[domain.PeerIdentifier]func(*domain.PeerStatus) (*domain.PeerStatus, error)) error {
+	args := m.Called(ctx, updates)
+	return args.Error(0)
+}
+
 func (m *MockDB) GetPeersByUser(ctx context.Context, userID domain.UserIdentifier, enabledOnly bool) ([]domain.Peer, error) {
 	args := m.Called(ctx, userID, enabledOnly)
 	return args.Get(0).([]domain.Peer), args.Error(1)
