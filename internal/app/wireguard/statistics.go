@@ -3,6 +3,7 @@ package wireguard
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,19 @@ type StatisticsDatabaseRepo interface {
 		ctx context.Context,
 		id domain.PeerIdentifier,
 		updateFunc func(in *domain.PeerStatus) (*domain.PeerStatus, error),
+	) error
+	// ClaimPeerStatus claims ownership of a peer status for this node
+	// Sets the OwnerNodeId and updates the peer status
+	// Returns error if ownership claim fails
+	ClaimPeerStatus(
+		ctx context.Context,
+		id domain.PeerIdentifier,
+		ownerNodeId string,
+		updateFunc func(in *domain.PeerStatus) (*domain.PeerStatus, error),
+	) error
+	BatchUpdatePeerStatuses(
+		ctx context.Context,
+		updates map[domain.PeerIdentifier]func(in *domain.PeerStatus) (*domain.PeerStatus, error),
 	) error
 	UpdateInterfaceStatus(
 		ctx context.Context,
@@ -86,11 +100,28 @@ func NewStatisticsCollector(
 }
 
 // StartBackgroundJobs starts the background jobs for the statistics collector.
-// This method is non-blocking and returns immediately.
+// This method is non-blocking and returns immediately after launching background goroutines.
+// Background jobs are delayed by 10 seconds to allow database connection pool to stabilize
+// and avoid connection storms during node startup in multi-node clusters.
 func (c *StatisticsCollector) StartBackgroundJobs(ctx context.Context) {
-	c.startPingWorkers(ctx)
-	c.startInterfaceDataFetcher(ctx)
-	c.startPeerDataFetcher(ctx)
+	// Start background job launcher with delay to allow connection pool stabilization
+	go func() {
+		// Wait 10 seconds before starting background jobs to allow:
+		// 1. Initial database connections to establish
+		// 2. Interface state restoration to complete
+		// 3. Connection pool to settle
+		// 4. Other services to start up
+		select {
+		case <-ctx.Done():
+			return // context cancelled before delay complete
+		case <-time.After(10 * time.Second):
+		}
+
+		slog.Info("starting background statistics jobs after startup delay")
+		c.startPingWorkers(ctx)
+		c.startInterfaceDataFetcher(ctx)
+		c.startPeerDataFetcher(ctx)
+	}()
 }
 
 func (c *StatisticsCollector) startInterfaceDataFetcher(ctx context.Context) {
@@ -194,7 +225,7 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 					for _, dbPeer := range dbPeers {
 						dbPeerMap[dbPeer.Identifier] = true
 					}
-					
+
 					// Clean up statuses for peers that no longer exist in WireGuard
 					for _, dbPeer := range dbPeers {
 						if !wireguardPeerMap[dbPeer.Identifier] {
@@ -220,7 +251,7 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 							}
 						}
 					}
-					
+
 					// Also clean up metrics for WireGuard peers that no longer exist in DB
 					// This handles the case where peer was deleted but metrics remain
 					for _, wgPeer := range wireguardPeers {
@@ -236,40 +267,85 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 				for _, peer := range wireguardPeers {
 					var connectionStateChanged bool
 					var newPeerStatus domain.PeerStatus
-					err = c.db.UpdatePeerStatus(ctx, peer.Identifier,
-						func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
-							wasConnected := p.IsConnected
 
-							var lastHandshake *time.Time
-							if !peer.LastHandshake.IsZero() {
-								lastHandshake = &peer.LastHandshake
-							}
+					// If peer has a recent handshake, claim ownership for this node
+					isConnected := !peer.LastHandshake.IsZero() && peer.LastHandshake.After(time.Now().Add(-2*time.Minute))
 
-							// calculate if session was restarted
-							p.UpdatedAt = time.Now()
-							p.LastSessionStart = getSessionStartTime(*p, peer.BytesUpload, peer.BytesDownload,
-								lastHandshake)
-							p.BytesReceived = peer.BytesUpload      // store bytes that where uploaded from the peer and received by the server
-							p.BytesTransmitted = peer.BytesDownload // store bytes that where received from the peer and sent by the server
-							p.Endpoint = peer.Endpoint
-							p.LastHandshake = lastHandshake
-							p.CalcConnected()
+					var err error
+					if isConnected {
+						// Claim ownership since peer is connected to this node
+						err = c.db.ClaimPeerStatus(ctx, peer.Identifier, c.cfg.Core.ClusterNodeId,
+							func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
+								wasConnected := p.IsConnected
 
-							if wasConnected != p.IsConnected {
-								slog.Debug("peer connection state changed", "peer", peer.Identifier, "connected", p.IsConnected)
-								connectionStateChanged = true
-								newPeerStatus = *p // store new status for event publishing
-							}
+								var lastHandshake *time.Time
+								if !peer.LastHandshake.IsZero() {
+									lastHandshake = &peer.LastHandshake
+								}
 
-							// Update prometheus metrics
-							go c.updatePeerMetrics(ctx, *p)
+								// calculate if session was restarted
+								p.UpdatedAt = time.Now()
+								p.LastSessionStart = getSessionStartTime(*p, peer.BytesUpload, peer.BytesDownload,
+									lastHandshake)
+								p.BytesReceived = peer.BytesUpload      // store bytes that where uploaded from the peer and received by the server
+								p.BytesTransmitted = peer.BytesDownload // store bytes that where received from the peer and sent by the server
+								p.Endpoint = peer.Endpoint
+								p.LastHandshake = lastHandshake
+								p.CalcConnected()
 
-							return p, nil
-						})
-					if err != nil {
-						slog.Warn("failed to update peer status", "peer", peer.Identifier, "error", err)
+								if wasConnected != p.IsConnected {
+									slog.Debug("peer connection state changed", "peer", peer.Identifier, "connected", p.IsConnected)
+									connectionStateChanged = true
+									newPeerStatus = *p // store new status for event publishing
+								}
+
+								// Update prometheus metrics
+								go c.updatePeerMetrics(ctx, *p)
+
+								return p, nil
+							})
+						if err != nil {
+							slog.Warn("failed to claim and update peer status", "peer", peer.Identifier, "node", c.cfg.Core.ClusterNodeId, "error", err)
+						} else {
+							slog.Debug("claimed and updated peer status", "peer", peer.Identifier, "node", c.cfg.Core.ClusterNodeId)
+						}
 					} else {
-						slog.Debug("updated peer status", "peer", peer.Identifier)
+						// Peer is not connected to this node, just update (don't claim)
+						err = c.db.UpdatePeerStatus(ctx, peer.Identifier,
+							func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
+								wasConnected := p.IsConnected
+
+								var lastHandshake *time.Time
+								if !peer.LastHandshake.IsZero() {
+									lastHandshake = &peer.LastHandshake
+								}
+
+								// calculate if session was restarted
+								p.UpdatedAt = time.Now()
+								p.LastSessionStart = getSessionStartTime(*p, peer.BytesUpload, peer.BytesDownload,
+									lastHandshake)
+								p.BytesReceived = peer.BytesUpload      // store bytes that where uploaded from the peer and received by the server
+								p.BytesTransmitted = peer.BytesDownload // store bytes that where received from the peer and sent by the server
+								p.Endpoint = peer.Endpoint
+								p.LastHandshake = lastHandshake
+								p.CalcConnected()
+
+								if wasConnected != p.IsConnected {
+									slog.Debug("peer connection state changed", "peer", peer.Identifier, "connected", p.IsConnected)
+									connectionStateChanged = true
+									newPeerStatus = *p // store new status for event publishing
+								}
+
+								// Update prometheus metrics
+								go c.updatePeerMetrics(ctx, *p)
+
+								return p, nil
+							})
+						if err != nil {
+							slog.Warn("failed to update peer status", "peer", peer.Identifier, "error", err)
+						} else {
+							slog.Debug("updated peer status", "peer", peer.Identifier)
+						}
 					}
 
 					if connectionStateChanged {
@@ -281,6 +357,15 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 						}
 						// publish event if connection state changed
 						c.bus.Publish(app.TopicPeerStateChanged, newPeerStatus, *peerModel)
+					}
+
+					// Spread out peer updates across time to avoid connection pool exhaustion
+					// 100ms per peer spreads all peers across ~29 seconds per collection cycle
+					// This ensures no burst of concurrent database queries
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(100 * time.Millisecond):
 					}
 				}
 			}
@@ -344,9 +429,19 @@ func (c *StatisticsCollector) startPingWorkers(ctx context.Context) {
 		slog.Debug("stopped ping checks")
 	}()
 
-	go c.enqueuePingChecks(ctx)
+	// Start ping checks with delay to avoid overwhelming database on startup
+	// This gives the system time to recover from initial synchronization stress
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Second):
+			slog.Info("starting ping checks after 30s startup delay")
+			c.enqueuePingChecks(ctx)
+		}
+	}()
 
-	slog.Debug("started ping checks")
+	slog.Debug("scheduled ping checks to start after 30 seconds")
 }
 
 func (c *StatisticsCollector) enqueuePingChecks(ctx context.Context) {
@@ -396,39 +491,74 @@ func (c *StatisticsCollector) pingWorker(ctx context.Context) {
 		slog.Debug("peer ping check completed", "peer", peer.Identifier, "pingable", peerPingable)
 
 		now := time.Now()
-		err := c.db.UpdatePeerStatus(ctx, peer.Identifier,
-			func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
-				wasConnected := p.IsConnected
 
-				if peerPingable {
+		// If peer is pingable/connected, claim ownership for this node
+		// This ensures only the node where the peer is connected updates its status
+		if peerPingable {
+			err := c.db.ClaimPeerStatus(ctx, peer.Identifier, c.cfg.Core.ClusterNodeId,
+				func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
+					wasConnected := p.IsConnected
+
 					p.IsPingable = true
 					p.LastPing = &now
-				} else {
+					p.UpdatedAt = time.Now()
+					p.CalcConnected()
+
+					if wasConnected != p.IsConnected {
+						connectionStateChanged = true
+						newPeerStatus = *p // store new status for event publishing
+					}
+
+					// Update prometheus metrics
+					go c.updatePeerMetrics(ctx, *p)
+
+					return p, nil
+				})
+			if err != nil {
+				slog.Warn("failed to claim and update peer ping status", "peer", peer.Identifier, "node", c.cfg.Core.ClusterNodeId, "error", err)
+			} else {
+				slog.Debug("claimed and updated peer ping status", "peer", peer.Identifier, "node", c.cfg.Core.ClusterNodeId)
+			}
+		} else {
+			// For unpingable peers, use regular update (doesn't claim ownership)
+			err := c.db.UpdatePeerStatus(ctx, peer.Identifier,
+				func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
+					wasConnected := p.IsConnected
+
 					p.IsPingable = false
 					p.LastPing = nil
-				}
-				p.UpdatedAt = time.Now()
-				p.CalcConnected()
+					p.UpdatedAt = time.Now()
+					p.CalcConnected()
 
-				if wasConnected != p.IsConnected {
-					connectionStateChanged = true
-					newPeerStatus = *p // store new status for event publishing
-				}
+					if wasConnected != p.IsConnected {
+						connectionStateChanged = true
+						newPeerStatus = *p // store new status for event publishing
+					}
 
-				// Update prometheus metrics
-				go c.updatePeerMetrics(ctx, *p)
+					// Update prometheus metrics
+					go c.updatePeerMetrics(ctx, *p)
 
-				return p, nil
-			})
-		if err != nil {
-			slog.Warn("failed to update peer ping status", "peer", peer.Identifier, "error", err)
-		} else {
-			slog.Debug("updated peer ping status", "peer", peer.Identifier)
+					return p, nil
+				})
+			if err != nil {
+				slog.Warn("failed to update peer ping status", "peer", peer.Identifier, "error", err)
+			} else {
+				slog.Debug("updated peer ping status", "peer", peer.Identifier)
+			}
 		}
 
 		if connectionStateChanged {
 			// publish event if connection state changed
 			c.bus.Publish(app.TopicPeerStateChanged, newPeerStatus, peer)
+		}
+
+		// Add delay between updates to reduce concurrent database operations and connection pool exhaustion
+		// With 3 workers and 283 peers, spreading updates over time prevents "Too many connections" errors
+		// 100ms per peer × 3 workers = ~9.4 seconds total per cycle
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
 }
@@ -497,15 +627,25 @@ func (c *StatisticsCollector) handlePeerDeleteEvent(peer domain.Peer) {
 
 	// Remove metrics for the deleted peer on THIS node
 	c.ms.RemovePeerMetrics(&peer)
-	
+
 	slog.Debug("cleaned up metrics for deleted peer on local node", "peerIdentifier", peer.Identifier)
 }
 
 // CleanOrphanedStatuses removes peer statuses and metrics for peers that no longer exist in the database.
-// This is called after SyncAllPeersFromDB to ensure orphaned statuses are cleaned up across all cluster nodes.
+// This is called after SyncAllPeersFromDB to ensure orphaned statuses are cleaned up.
+// OPTIMIZATION: Only run this on the first cluster node to avoid 24x database load
+// since all nodes would do the same work and just exhaust the connection pool
 func (c *StatisticsCollector) CleanOrphanedStatuses(ctx context.Context) {
-	slog.Info("CleanOrphanedStatuses: starting cleanup")
-	
+	// CRITICAL: Skip cleanup on non-primary nodes to prevent 24 nodes from hammering DB with identical queries
+	// Only the node with ClusterNodeId of '1' or containing "node-1" should do this
+	// This prevents N+1 query explosion (600+ queries per call) multiplied by 24 nodes = database collapse
+	if !c.isPrimaryNode() {
+		slog.Debug("CleanOrphanedStatuses: skipping on non-primary node", "node_id", c.cfg.Core.ClusterNodeId)
+		return
+	}
+
+	slog.Info("CleanOrphanedStatuses: starting cleanup on primary node")
+
 	// Get all peers from database
 	dbPeers, err := c.db.GetAllPeers(ctx)
 	if err != nil {
@@ -522,30 +662,30 @@ func (c *StatisticsCollector) CleanOrphanedStatuses(ctx context.Context) {
 	}
 
 	cleanedCount := 0
-	
+
 	// 1. Check peer_statuses table for orphaned records
 	allStatuses, err := c.db.GetAllPeerStatuses(ctx)
 	if err != nil {
 		slog.Warn("failed to fetch peer statuses for orphaned cleanup", "error", err)
 	} else {
 		slog.Debug("CleanOrphanedStatuses: found peer statuses", "count", len(allStatuses))
-		
+
 		for _, status := range allStatuses {
 			if !validPeerMap[status.PeerId] {
 				slog.Info("found orphaned peer status, cleaning up", "peer", status.PeerId)
-				
+
 				// Delete orphaned status from database
 				if err := c.db.DeletePeerStatus(ctx, status.PeerId); err != nil {
 					slog.Warn("failed to delete orphaned peer status", "peer", status.PeerId, "error", err)
 				}
-				
+
 				// Remove orphaned metrics from THIS node's registry
 				c.ms.RemovePeerMetricsByID(string(status.PeerId))
 				cleanedCount++
 			}
 		}
 	}
-	
+
 	// 2. Also check WireGuard interfaces for peers that shouldn't be there
 	// This catches cases where peer was removed but metrics still exist in memory
 	interfaces, err := c.db.GetAllInterfaces(ctx)
@@ -565,7 +705,7 @@ func (c *StatisticsCollector) CleanOrphanedStatuses(ctx context.Context) {
 			for _, wgPeer := range wgPeers {
 				if !validPeerMap[wgPeer.Identifier] {
 					slog.Info("found orphaned peer in WireGuard, cleaning up metrics", "peer", wgPeer.Identifier, "interface", iface.Identifier)
-					
+
 					// Remove orphaned metrics (status was already cleaned above or doesn't exist)
 					c.ms.RemovePeerMetricsByID(string(wgPeer.Identifier))
 					cleanedCount++
@@ -579,4 +719,16 @@ func (c *StatisticsCollector) CleanOrphanedStatuses(ctx context.Context) {
 	} else {
 		slog.Debug("CleanOrphanedStatuses: no orphaned peers found")
 	}
+}
+
+// isPrimaryNode returns true if this is the primary cleanup node
+// Uses ClusterNodeId to determine primary (expected to end with "1")
+func (c *StatisticsCollector) isPrimaryNode() bool {
+	nodeId := c.cfg.Core.ClusterNodeId
+	if nodeId == "" {
+		return true // if no cluster ID, assume primary to ensure cleanup happens
+	}
+	// Node is marked as primary if its ID contains "-1" or ends with "1" suffix
+	// This ensures only ONE designated node does the expensive cleanup
+	return strings.Contains(nodeId, "-1")
 }
