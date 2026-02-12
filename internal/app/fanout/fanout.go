@@ -48,7 +48,11 @@ type settings struct {
 	TLSCACertFile      string
 }
 
-func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardManager *wireguard.Manager, collector *wireguard.StatisticsCollector) {
+type MetricsServerHealthUpdater interface {
+	SetSyncStatus(ok bool, errMsg string)
+}
+
+func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardManager *wireguard.Manager, collector *wireguard.StatisticsCollector, metricsServer MetricsServerHealthUpdater) {
 	s := settings{
 		Enabled:            fc.Enabled,
 		Peers:              append([]string(nil), fc.Peers...),
@@ -99,9 +103,10 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 	}
 
 	f := &fanout{
-		cfg:      s,
-		client:   createHTTPClient(s),
-		debounce: newDebouncer(s.Debounce),
+		cfg:            s,
+		client:         createHTTPClient(s),
+		debounce:       newDebouncer(s.Debounce),
+		metricsServer:  metricsServer,
 	}
 	if bus != nil {
 		for _, topic := range s.Topics {
@@ -190,9 +195,10 @@ func createHTTPClient(s settings) *http.Client {
 }
 
 type fanout struct {
-	cfg      settings
-	client   *http.Client
-	debounce *debouncer
+	cfg            settings
+	client         *http.Client
+	debounce       *debouncer
+	metricsServer  MetricsServerHealthUpdater
 }
 
 func (f *fanout) loop(ctx context.Context) {
@@ -213,6 +219,8 @@ func (f *fanout) bump(reason string) {
 
 func (f *fanout) fire(ctx context.Context) {
 	var wg sync.WaitGroup
+	var failedPeers []string
+	var failedMutex sync.Mutex
 
 	for _, base := range f.cfg.Peers {
 		base = strings.TrimSpace(base)
@@ -231,6 +239,9 @@ func (f *fanout) fire(ctx context.Context) {
 			req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
 			if err != nil {
 				slog.Warn("[FANOUT] build request failed", "url", u, "err", err)
+				failedMutex.Lock()
+				failedPeers = append(failedPeers, u)
+				failedMutex.Unlock()
 				return
 			}
 
@@ -248,12 +259,18 @@ func (f *fanout) fire(ctx context.Context) {
 			resp, err := f.client.Do(req)
 			if err != nil {
 				slog.Warn("[FANOUT] sync failed", "url", u, "err", err)
+				failedMutex.Lock()
+				failedPeers = append(failedPeers, u)
+				failedMutex.Unlock()
 				return
 			}
 			_ = resp.Body.Close()
 
 			if resp.StatusCode >= 300 {
 				slog.Warn("[FANOUT] sync non-2xx", "url", u, "status", resp.Status)
+				failedMutex.Lock()
+				failedPeers = append(failedPeers, u+" ("+resp.Status+")")
+				failedMutex.Unlock()
 				return
 			}
 			slog.Debug("[FANOUT] sync ok", "url", u)
@@ -261,6 +278,14 @@ func (f *fanout) fire(ctx context.Context) {
 	}
 
 	wg.Wait()
+
+	// Update health status based on sync results
+	if len(failedPeers) > 0 {
+		errMsg := "Sync failed for peers: " + strings.Join(failedPeers, ", ")
+		f.metricsServer.SetSyncStatus(false, errMsg)
+	} else {
+		f.metricsServer.SetSyncStatus(true, "")
+	}
 }
 
 type debouncer struct {
