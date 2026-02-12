@@ -2,9 +2,11 @@ package adapters
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -15,6 +17,14 @@ import (
 	"github.com/fedor-git/wg-portal-2/internal/config"
 	"github.com/fedor-git/wg-portal-2/internal/domain"
 )
+
+type HealthStatus struct {
+	Health        bool      `json:"health"`
+	DatabaseOk    bool      `json:"database_ok"`
+	SyncOk        bool      `json:"sync_ok"`
+	LastSyncError string    `json:"last_sync_error,omitempty"`
+	LastCheckTime time.Time `json:"last_check_time"`
+}
 
 type MetricsServer struct {
 	*http.Server
@@ -30,6 +40,12 @@ type MetricsServer struct {
 	peerLastHandshakeSeconds *prometheus.GaugeVec
 	peerReceivedBytesTotal   *prometheus.GaugeVec
 	peerSendBytesTotal       *prometheus.GaugeVec
+
+	healthStatus      *HealthStatus
+	healthMutex       sync.RWMutex
+	serverActive      bool                // Tracks if HTTP server is currently listening
+	serverActiveMutex sync.RWMutex        // Protects serverActive flag
+	stopHealthMonitor context.CancelFunc  // Cancels the health monitor goroutine
 }
 
 // Wireguard metrics labels
@@ -54,6 +70,13 @@ func NewMetricsServer(cfg *config.Config, db *gorm.DB) *MetricsServer {
 	       DB:  db,
 	       cfg: cfg,
 	       registry: reg,
+
+	       healthStatus: &HealthStatus{
+		       Health:        true,
+		       DatabaseOk:    true,
+		       SyncOk:        true,
+		       LastCheckTime: time.Now(),
+	       },
 
 	       ifaceReceivedBytesTotal: prometheus.NewGaugeVec(
 		       prometheus.GaugeOpts{
@@ -111,11 +134,22 @@ func NewMetricsServer(cfg *config.Config, db *gorm.DB) *MetricsServer {
 	       slog.Info("Detailed peer metrics disabled (only peer_up will be exported)")
        }
 
+       // Add health check endpoint
+       mux.HandleFunc("/health", ms.handleHealth)
+
        return ms
 }
 
 // Run starts the metrics server. The function blocks until the context is cancelled.
+// If both DB and sync health fail, the HTTP server will be automatically closed to signal unhealthiness.
+// When health is restored, the server will be restarted.
 func (m *MetricsServer) Run(ctx context.Context) {
+	monitorCtx, cancelMonitor := context.WithCancel(context.Background())
+	m.stopHealthMonitor = cancelMonitor
+
+	// Start health monitor goroutine
+	go m.monitorHealth(monitorCtx)
+
 	// Run the metrics server in a goroutine
 	go func() {
 		if err := m.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -123,10 +157,17 @@ func (m *MetricsServer) Run(ctx context.Context) {
 		}
 	}()
 
+	m.serverActiveMutex.Lock()
+	m.serverActive = true
+	m.serverActiveMutex.Unlock()
+
 	slog.Info("started metrics service", "address", m.Addr)
 
 	// Wait for the context to be done
 	<-ctx.Done()
+
+	// Cancel the health monitor
+	cancelMonitor()
 
 	// Create a context with timeout for the shutdown process
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -137,6 +178,63 @@ func (m *MetricsServer) Run(ctx context.Context) {
 		slog.Error("metrics service shutdown failed", "address", m.Addr, "error", err)
 	} else {
 		slog.Info("metrics service shutdown gracefully", "address", m.Addr)
+	}
+}
+
+// monitorHealth checks if both DB and sync are down. If so, closes the server to signal unhealthiness.
+func (m *MetricsServer) monitorHealth(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	var lastHealthy bool = true
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			health := m.GetHealth()
+			isHealthy := health.DatabaseOk && health.SyncOk
+
+			// State changed: from healthy to unhealthy
+			if lastHealthy && !isHealthy {
+				slog.Warn("Critical health failure detected (DB and/or sync down), closing metrics port")
+				m.serverActiveMutex.Lock()
+				wasActive := m.serverActive
+				m.serverActive = false
+				m.serverActiveMutex.Unlock()
+
+				if wasActive {
+					// Gracefully close the current listener
+					shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					if err := m.Shutdown(shutdownCtx); err != nil {
+						slog.Error("Failed to shutdown metrics server", "error", err)
+					}
+					cancel()
+				}
+			}
+
+			// State changed: from unhealthy to healthy
+			if !lastHealthy && isHealthy {
+				slog.Info("Health restored (DB and sync up), reopening metrics port")
+				m.serverActiveMutex.Lock()
+				wasClosed := !m.serverActive
+				m.serverActive = true
+				m.serverActiveMutex.Unlock()
+
+				if wasClosed {
+					// Restart the listener
+					go func() {
+						if err := m.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+							slog.Error("metrics service restart failed", "address", m.Addr, "error", err)
+						}
+					}()
+					slog.Info("metrics service restarted", "address", m.Addr)
+				}
+			}
+
+			lastHealthy = isHealthy
+		}
 	}
 }
 
@@ -348,4 +446,52 @@ func (m *MetricsServer) RemovePeerMetricsByID(peerId string) {
        }
 
        slog.Info("Completed removal of metrics for peer by id", "id", peerId, "name", "unknown")
+}
+
+// SetSyncStatus updates the sync status for the health check
+func (m *MetricsServer) SetSyncStatus(ok bool, errMsg string) {
+	m.healthMutex.Lock()
+	defer m.healthMutex.Unlock()
+
+	m.healthStatus.SyncOk = ok
+	if !ok {
+		m.healthStatus.LastSyncError = errMsg
+	} else {
+		m.healthStatus.LastSyncError = ""
+	}
+	m.healthStatus.LastCheckTime = time.Now()
+}
+
+// GetHealth returns the current health status
+func (m *MetricsServer) GetHealth() HealthStatus {
+	m.healthMutex.RLock()
+	defer m.healthMutex.RUnlock()
+
+	// Check DB connection
+	health := *m.healthStatus
+	if m.DB.Exec("SELECT 1").Error != nil {
+		health.DatabaseOk = false
+	} else {
+		health.DatabaseOk = true
+	}
+
+	// Overall health is OK only if both DB and sync are OK
+	health.Health = health.DatabaseOk && health.SyncOk
+
+	return health
+}
+
+// handleHealth handles the /health endpoint
+func (m *MetricsServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+	health := m.GetHealth()
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if !health.Health {
+		w.WriteHeader(http.StatusServiceUnavailable) // 503
+	} else {
+		w.WriteHeader(http.StatusOK) // 200
+	}
+
+	json.NewEncoder(w).Encode(health)
 }

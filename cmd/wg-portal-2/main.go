@@ -103,7 +103,7 @@ func main() {
 	internal.AssertNoError(err)
 	wireGuardManager.StartBackgroundJobs(ctx)
 
-	fanout.Start(ctx, eventBus, cfg.Core.Fanout, wireGuardManager, statisticsCollector)
+	fanout.Start(ctx, eventBus, cfg.Core.Fanout, wireGuardManager, statisticsCollector, metricsServer)
 
 	cfgFileManager, err := configfile.NewConfigFileManager(cfg, eventBus, database, database, cfgFileSystem)
 	internal.AssertNoError(err)
