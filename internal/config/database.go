@@ -28,4 +28,10 @@ type DatabaseConfig struct {
 	// EncryptionPassphrase is the passphrase used to encrypt sensitive data (WireGuard keys) in the database.
 	// If no passphrase is provided, no encryption will be used.
 	EncryptionPassphrase string `yaml:"encryption_passphrase"`
+	// MaxOpenConnections is the maximum number of open connections to the database.
+	MaxOpenConnections int `yaml:"max_open_connections"`
+	// MaxIdleConnections is the maximum number of idle connections in the connection pool.
+	MaxIdleConnections int `yaml:"max_idle_connections"`
+	// ConnectionMaxLifetime is the maximum lifetime of a connection (e.g., "3m", "1h").
+	ConnectionMaxLifetime time.Duration `yaml:"connection_max_lifetime"`
 }

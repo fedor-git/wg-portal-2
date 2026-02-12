@@ -117,6 +117,41 @@ func (l *GormLogger) Trace(ctx context.Context, begin time.Time, fc func() (stri
 	}
 }
 
+// applyConnectionPoolConfig applies the connection pool configuration from config to the database.
+func applyConnectionPoolConfig(db *gorm.DB, cfg config.DatabaseConfig) error {
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("failed to get underlying sql.DB: %w", err)
+	}
+
+	// Use configured values, or defaults if not specified
+	maxOpen := cfg.MaxOpenConnections
+	if maxOpen <= 0 {
+		maxOpen = 50
+	}
+
+	maxIdle := cfg.MaxIdleConnections
+	if maxIdle <= 0 {
+		maxIdle = 10
+	}
+
+	maxLifetime := cfg.ConnectionMaxLifetime
+	if maxLifetime <= 0 {
+		maxLifetime = 3 * time.Minute
+	}
+
+	sqlDB.SetMaxOpenConns(maxOpen)
+	sqlDB.SetMaxIdleConns(maxIdle)
+	sqlDB.SetConnMaxLifetime(maxLifetime)
+
+	slog.Info("Database connection pool configured",
+		"max_open_connections", maxOpen,
+		"max_idle_connections", maxIdle,
+		"connection_max_lifetime", maxLifetime.String())
+
+	return nil
+}
+
 // NewDatabase creates a new database connection and returns a Gorm database instance.
 func NewDatabase(cfg config.DatabaseConfig) (*gorm.DB, error) {
 	var gormDb *gorm.DB
@@ -131,10 +166,12 @@ func NewDatabase(cfg config.DatabaseConfig) (*gorm.DB, error) {
 			return nil, fmt.Errorf("failed to open MySQL database: %w", err)
 		}
 
+		// Apply connection pool configuration
+		if err := applyConnectionPoolConfig(gormDb, cfg); err != nil {
+			return nil, fmt.Errorf("failed to configure MySQL connection pool: %w", err)
+		}
+
 		sqlDB, _ := gormDb.DB()
-		sqlDB.SetConnMaxLifetime(time.Minute * 5)
-		sqlDB.SetMaxIdleConns(2)
-		sqlDB.SetMaxOpenConns(10)
 		err = sqlDB.Ping() // This DOES open a connection if necessary. This makes sure the database is accessible
 		if err != nil {
 			return nil, fmt.Errorf("failed to ping MySQL database: %w", err)
@@ -146,12 +183,22 @@ func NewDatabase(cfg config.DatabaseConfig) (*gorm.DB, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to open sqlserver database: %w", err)
 		}
+
+		// Apply connection pool configuration
+		if err := applyConnectionPoolConfig(gormDb, cfg); err != nil {
+			return nil, fmt.Errorf("failed to configure MSSQL connection pool: %w", err)
+		}
 	case config.DatabasePostgres:
 		gormDb, err = gorm.Open(postgres.Open(cfg.DSN), &gorm.Config{
 			Logger: NewLogger(cfg.SlowQueryThreshold, cfg.Debug),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to open Postgres database: %w", err)
+		}
+
+		// Apply connection pool configuration
+		if err := applyConnectionPoolConfig(gormDb, cfg); err != nil {
+			return nil, fmt.Errorf("failed to configure PostgreSQL connection pool: %w", err)
 		}
 	case config.DatabaseSQLite:
 		if _, err = os.Stat(filepath.Dir(cfg.DSN)); os.IsNotExist(err) {
@@ -166,8 +213,10 @@ func NewDatabase(cfg config.DatabaseConfig) (*gorm.DB, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to open sqlite database: %w", err)
 		}
+		// SQLite doesn't benefit from connection pooling, set to 1
 		sqlDB, _ := gormDb.DB()
 		sqlDB.SetMaxOpenConns(1)
+		slog.Info("SQLite connection configured (non-pooled)")
 	}
 
 	return gormDb, nil
