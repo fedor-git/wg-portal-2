@@ -41,11 +41,8 @@ type MetricsServer struct {
 	peerReceivedBytesTotal   *prometheus.GaugeVec
 	peerSendBytesTotal       *prometheus.GaugeVec
 
-	healthStatus      *HealthStatus
-	healthMutex       sync.RWMutex
-	serverActive      bool                // Tracks if HTTP server is currently listening
-	serverActiveMutex sync.RWMutex        // Protects serverActive flag
-	stopHealthMonitor context.CancelFunc  // Cancels the health monitor goroutine
+	healthStatus  *HealthStatus
+	healthMutex   sync.RWMutex
 }
 
 // Wireguard metrics labels
@@ -141,15 +138,9 @@ func NewMetricsServer(cfg *config.Config, db *gorm.DB) *MetricsServer {
 }
 
 // Run starts the metrics server. The function blocks until the context is cancelled.
-// If both DB and sync health fail, the HTTP server will be automatically closed to signal unhealthiness.
-// When health is restored, the server will be restarted.
+// Metrics endpoint is always available regardless of database or sync status.
+// Use /health endpoint to check cluster health status.
 func (m *MetricsServer) Run(ctx context.Context) {
-	monitorCtx, cancelMonitor := context.WithCancel(context.Background())
-	m.stopHealthMonitor = cancelMonitor
-
-	// Start health monitor goroutine
-	go m.monitorHealth(monitorCtx)
-
 	// Run the metrics server in a goroutine
 	go func() {
 		if err := m.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -157,17 +148,10 @@ func (m *MetricsServer) Run(ctx context.Context) {
 		}
 	}()
 
-	m.serverActiveMutex.Lock()
-	m.serverActive = true
-	m.serverActiveMutex.Unlock()
-
 	slog.Info("started metrics service", "address", m.Addr)
 
 	// Wait for the context to be done
 	<-ctx.Done()
-
-	// Cancel the health monitor
-	cancelMonitor()
 
 	// Create a context with timeout for the shutdown process
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -182,61 +166,6 @@ func (m *MetricsServer) Run(ctx context.Context) {
 }
 
 // monitorHealth checks if both DB and sync are down. If so, closes the server to signal unhealthiness.
-func (m *MetricsServer) monitorHealth(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	var lastHealthy bool = true
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			health := m.GetHealth()
-			isHealthy := health.DatabaseOk && health.SyncOk
-
-			// State changed: from healthy to unhealthy
-			if lastHealthy && !isHealthy {
-				slog.Warn("Critical health failure detected (DB and/or sync down), closing metrics port")
-				m.serverActiveMutex.Lock()
-				wasActive := m.serverActive
-				m.serverActive = false
-				m.serverActiveMutex.Unlock()
-
-				if wasActive {
-					// Gracefully close the current listener
-					shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-					if err := m.Shutdown(shutdownCtx); err != nil {
-						slog.Error("Failed to shutdown metrics server", "error", err)
-					}
-					cancel()
-				}
-			}
-
-			// State changed: from unhealthy to healthy
-			if !lastHealthy && isHealthy {
-				slog.Info("Health restored (DB and sync up), reopening metrics port")
-				m.serverActiveMutex.Lock()
-				wasClosed := !m.serverActive
-				m.serverActive = true
-				m.serverActiveMutex.Unlock()
-
-				if wasClosed {
-					// Restart the listener
-					go func() {
-						if err := m.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-							slog.Error("metrics service restart failed", "address", m.Addr, "error", err)
-						}
-					}()
-					slog.Info("metrics service restarted", "address", m.Addr)
-				}
-			}
-
-			lastHealthy = isHealthy
-		}
-	}
-}
 
 // UpdateInterfaceMetrics updates the metrics for the given interface
 func (m *MetricsServer) UpdateInterfaceMetrics(status domain.InterfaceStatus) {

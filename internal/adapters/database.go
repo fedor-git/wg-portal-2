@@ -31,6 +31,20 @@ type SysStat struct {
 	SchemaVersion uint64    `gorm:"primaryKey,column:schema_version"`
 }
 
+// NodeSyncLock provides distributed locking for peer synchronization across nodes.
+// Only one node can hold the lock at a time, preventing concurrent syncs that cause
+// database contention and 504 Gateway Timeout errors.
+type NodeSyncLock struct {
+	LockKey   string    `gorm:"primaryKey;column:lock_key"`
+	NodeID    string    `gorm:"column:node_id;index"`
+	LockedAt  time.Time `gorm:"column:locked_at"`
+	ExpiresAt time.Time `gorm:"column:expires_at;index"` // Auto-release stuck locks after 5 minutes
+}
+
+func (NodeSyncLock) TableName() string {
+	return "node_sync_locks"
+}
+
 // GormLogger is a custom logger for Gorm, making it use slog
 type GormLogger struct {
 	SlowThreshold           time.Duration
@@ -139,9 +153,19 @@ func applyConnectionPoolConfig(db *gorm.DB, cfg config.DatabaseConfig) error {
 		maxLifetime = 3 * time.Minute
 	}
 
-	// Don't open connections until needed - reduces startup pool exhaustion
-	// In multi-node cluster with 24 nodes, early connection creation causes pool exhaustion
-	maxIdle = 5 // Start with fewer idle connections
+	// For multi-node cluster with 24 nodes, ensure adequate pool size
+	// Each node may need 2-3 concurrent connections for:
+	// - Interface/peer sync operations
+	// - Message bus event processing
+	// - Regular API requests
+	// Recommended: maxOpen = (nodes * 2-3) + buffer, e.g., 24*2.5 = 60
+	if maxOpen < 60 {
+		slog.Warn("Connection pool size may be too small for multi-node cluster",
+			"configured", maxOpen, "recommended_minimum", 60)
+	}
+	if maxIdle < 10 {
+		maxIdle = 10 // Ensure minimum idle connections for cluster
+	}
 	
 	sqlDB.SetMaxOpenConns(maxOpen)
 	sqlDB.SetMaxIdleConns(maxIdle)
@@ -166,23 +190,31 @@ func NewDatabase(cfg config.DatabaseConfig) (*gorm.DB, error) {
 
 	// Retry logic for initial database connection
 	// With 24 nodes starting simultaneously, initial connection can fail with "Too many connections"
-	const maxRetries = 10
+	// Increased to 50 retries to handle all 24 nodes with exponential backoff and jitter
+	// This gives us up to ~2 minutes of retry time with proper staggering
+	const maxRetries = 50
 	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
 			// Exponential backoff with random jitter to prevent thundering herd
-			// With 24 nodes starting simultaneously, stagger retries
-			// Exponential: 100ms, 200ms, 400ms, 800ms, 1.6s, 3.2s...
-			// Jitter: ±50% randomness so not all nodes retry at same time
-			baseWaitTime := time.Duration(100*(1<<uint(attempt-1))) * time.Millisecond
-			jitterAmount := time.Duration(rand.Intn(int(baseWaitTime/2))) // ±50% jitter
+			// With 24 nodes starting simultaneously, stagger retries much more aggressively
+			// Exponential: 50ms, 100ms, 200ms, 400ms, 800ms, 1.6s, 3.2s, 6.4s...
+			// Jitter: ±100% randomness so not all nodes retry at same time
+			baseWaitTime := time.Duration(50*(1<<uint(attempt-1))) * time.Millisecond
+			// Cap base wait at 10 seconds to avoid excessive delays
+			if baseWaitTime > 10*time.Second {
+				baseWaitTime = 10 * time.Second
+			}
+			// Full randomness jitter to spread retries across time
+			jitterAmount := time.Duration(rand.Intn(int(baseWaitTime))) // ±100% jitter
 			waitTime := baseWaitTime + jitterAmount
 			
-			slog.Warn("database connection attempt failed, retrying",
+			slog.Warn("database connection attempt failed, retrying with exponential backoff",
 				"attempt", attempt+1,
 				"max_retries", maxRetries,
-				"wait_time", waitTime.String(),
+				"base_wait", baseWaitTime.String(),
+				"actual_wait", waitTime.String(),
 				"error", lastErr)
 			time.Sleep(waitTime)
 		}
@@ -206,16 +238,9 @@ func NewDatabase(cfg config.DatabaseConfig) (*gorm.DB, error) {
 				continue
 			}
 
-			sqlDB, _ := gormDb.DB()
-			err = sqlDB.Ping() // This DOES open a connection if necessary
-			if err != nil {
-				lastErr = fmt.Errorf("failed to ping MySQL database: %w", err)
-				if strings.Contains(err.Error(), "Too many connections") {
-					continue // Retry on connection pool exhaustion
-				}
-				return nil, lastErr
-			}
-
+			// Skip Ping() during initial connection to avoid connection pool exhaustion
+			// during multi-node startup. gorm.Open() already validates the connection.
+			// Ping would open another connection which might fail with "Too many connections"
 			slog.Info("database connected successfully", "type", "MySQL", "attempt", attempt+1)
 			return gormDb, nil
 
@@ -345,6 +370,7 @@ func (r *SqlRepo) migrate() error {
 	slog.Debug("running migration: peer status", "result", r.db.AutoMigrate(&domain.PeerStatus{}))
 	slog.Debug("running migration: interface status", "result", r.db.AutoMigrate(&domain.InterfaceStatus{}))
 	slog.Debug("running migration: audit data", "result", r.db.AutoMigrate(&domain.AuditEntry{}))
+	slog.Debug("running migration: node sync lock", "result", r.db.AutoMigrate(&NodeSyncLock{}))
 
 	existingSysStat := SysStat{}
 	r.db.Where("schema_version = ?", SchemaVersion).First(&existingSysStat)
@@ -1427,8 +1453,235 @@ func (r *SqlRepo) GetAllPeers(ctx context.Context) ([]domain.Peer, error) {
 	return peers, nil
 }
 
+// region node sync lock
+
+const (
+	syncLockKey      = "peer:sync"
+	syncLockDuration = 5 * time.Minute // Auto-release stuck locks after 5 minutes
+	syncLockTimeout  = 2 * time.Minute // Total wait time for acquiring lock
+)
+
+// AcquireSyncLock attempts to acquire the global peer sync lock.
+// Returns nodeID that holds the lock, or empty string if we acquired it.
+// Uses exponential backoff to retry up to syncLockTimeout.
+func (r *SqlRepo) AcquireSyncLock(ctx context.Context, nodeID string) (acquiredBy string, err error) {
+	// Use generic lock mechanism
+	return r.AcquireLock(ctx, syncLockKey, nodeID, syncLockDuration)
+}
+
+// ReleaseSyncLock releases the global peer sync lock.
+func (r *SqlRepo) ReleaseSyncLock(ctx context.Context, nodeID string) error {
+	return r.ReleaseLock(ctx, syncLockKey, nodeID)
+}
+
+// SyncAllPeersFromDBWithLock wraps sync to ensure only one node syncs at a time.
+// This prevents database contention and 504 Gateway Timeout cascades.
+func (r *SqlRepo) SyncAllPeersFromDBWithLock(ctx context.Context, nodeID string) (int, error) {
+	// Try to acquire lock with timeout
+	lockCtx, cancel := context.WithTimeout(ctx, syncLockTimeout)
+	defer cancel()
+
+	heldBy, err := r.AcquireSyncLock(lockCtx, nodeID)
+	if err != nil {
+		slog.Warn("[SYNC_LOCK] cannot acquire sync lock, another node is syncing",
+			"held_by", heldBy, "self", nodeID, "error", err)
+		// Return 0,0 to indicate no sync performed (not an error condition)
+		return 0, nil
+	}
+
+	// Ensure lock is released after we're done (even if sync fails)
+	defer func() {
+		if relErr := r.ReleaseSyncLock(context.Background(), nodeID); relErr != nil {
+			slog.Error("failed to release sync lock", "error", relErr)
+		}
+	}()
+
+	// Now perform the actual sync with the lock held
+	count, err := r.SyncAllPeersFromDB(ctx)
+	if err != nil {
+		slog.Error("[SYNC_LOCK] sync failed while holding lock", "node_id", nodeID, "error", err)
+		return count, err
+	}
+
+	slog.Info("[SYNC_LOCK] sync completed", "node_id", nodeID, "synced_count", count)
+	return count, nil
+}
+
+// endregion node sync lock
+
 // SyncAllPeersFromDB synchronizes all peers from the database.
 func (r *SqlRepo) SyncAllPeersFromDB(ctx context.Context) (int, error) {
 	slog.Debug("SyncAllPeersFromDB called, but no operation performed")
 	return 0, nil
 }
+
+// region expired peers cleanup
+
+const (
+	expireCleanupLockKey      = "expire:cleanup"
+	expireCleanupLockDuration = 10 * time.Minute // Lock to ensure only one node performs cleanup
+	expireCleanupTimeout      = 30 * time.Second // Timeout for acquiring lock
+)
+
+// GetExpiredPeers finds all peers with expiredAt in the past
+func (r *SqlRepo) GetExpiredPeers(ctx context.Context) ([]domain.Peer, error) {
+	var peers []domain.Peer
+	now := time.Now()
+	
+	err := r.db.WithContext(ctx).
+		Where("expires_at IS NOT NULL AND expires_at < ?", now).
+		Select("identifier, interface_identifier").
+		Find(&peers).Error
+	
+	if err != nil {
+		return nil, err
+	}
+	
+	return peers, nil
+}
+
+// DeletePeersByIDs deletes peers by their Identifier (public key)
+// Used when cleaning up expired peers
+func (r *SqlRepo) DeletePeersByIDs(ctx context.Context, peerIDs []string) (int64, error) {
+	if len(peerIDs) == 0 {
+		return 0, nil
+	}
+	
+	result := r.db.WithContext(ctx).
+		Where("identifier IN ?", peerIDs).
+		Delete(&domain.Peer{})
+	
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	
+	return result.RowsAffected, nil
+}
+
+// FindAndDeleteExpiredPeersWithLock ensures only one node cleanup all expired peers
+// Other nodes wait for lock or receive event about which IDs were deleted
+func (r *SqlRepo) FindAndDeleteExpiredPeersWithLock(ctx context.Context, nodeID string) (expiredPeerIDs []string, err error) {
+	// Attempt to acquire lock for cleanup
+	lockCtx, cancel := context.WithTimeout(ctx, expireCleanupTimeout)
+	defer cancel()
+	
+	heldBy, lockErr := r.AcquireLock(lockCtx, expireCleanupLockKey, nodeID, expireCleanupLockDuration)
+	if lockErr != nil {
+		// Another node is performing cleanup, we wait or skip
+		slog.Debug("[EXPIRE_CLEANUP] lock held by another node, skipping cleanup",
+			"held_by", heldBy, "self", nodeID)
+		return nil, nil
+	}
+	
+	// We have lock, performing cleanup
+	defer func() {
+		if relErr := r.ReleaseLock(context.Background(), expireCleanupLockKey, nodeID); relErr != nil {
+			slog.Error("[EXPIRE_CLEANUP] failed to release cleanup lock", "error", relErr)
+		}
+	}()
+	
+	// Find expired peers
+	expiredPeers, err := r.GetExpiredPeers(ctx)
+	if err != nil {
+		slog.Error("[EXPIRE_CLEANUP] failed to get expired peers", "error", err)
+		return nil, err
+	}
+	
+	if len(expiredPeers) == 0 {
+		slog.Debug("[EXPIRE_CLEANUP] no expired peers found")
+		return nil, nil
+	}
+	
+	// Delete them from DB
+	peerIDs := make([]string, len(expiredPeers))
+	for i, p := range expiredPeers {
+		peerIDs[i] = string(p.Identifier)
+	}
+	
+	deletedCount, err := r.DeletePeersByIDs(ctx, peerIDs)
+	if err != nil {
+		slog.Error("[EXPIRE_CLEANUP] failed to delete expired peers", "error", err, "count", len(peerIDs))
+		return nil, err
+	}
+	
+	slog.Info("[EXPIRE_CLEANUP] deleted expired peers",
+		"node_id", nodeID, "count", deletedCount, "peer_ids_count", len(peerIDs))
+	
+	return peerIDs, nil
+}
+
+// endregion expired peers cleanup
+
+// region generic distributed locking (for reuse)
+
+// AcquireLock is a generic lock mechanism for various operations
+func (r *SqlRepo) AcquireLock(ctx context.Context, lockKey string, nodeID string, duration time.Duration) (acquiredBy string, err error) {
+	const maxRetries = 12
+	backoff := 50 * time.Millisecond
+
+	// Clean up expired locks
+	now := time.Now()
+	if delErr := r.db.WithContext(ctx).
+		Where("lock_key = ? AND expires_at < ?", lockKey, now).
+		Delete(&NodeSyncLock{}).Error; delErr != nil {
+		slog.Debug("failed to clean expired locks", "lock_key", lockKey, "error", delErr)
+	}
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		result := r.db.WithContext(ctx).
+			Clauses(clause.OnConflict{
+				UpdateAll: false,
+			}).
+			Create(&NodeSyncLock{
+				LockKey:   lockKey,
+				NodeID:    nodeID,
+				LockedAt:  now,
+				ExpiresAt: now.Add(duration),
+			})
+
+		if result.Error == nil {
+			slog.Debug("[LOCK] acquired", "lock_key", lockKey, "node_id", nodeID)
+			return "", nil
+		}
+
+		// Check who holds the lock
+		var lock NodeSyncLock
+		if err := r.db.WithContext(ctx).
+			Where("lock_key = ?", lockKey).
+			First(&lock).Error; err == nil {
+			if lock.ExpiresAt.Before(now) {
+				r.db.WithContext(ctx).Delete(&lock)
+				continue
+			}
+			acquiredBy = lock.NodeID
+		}
+
+		if attempt < maxRetries-1 {
+			select {
+			case <-time.After(backoff):
+				if backoff < 3*time.Second {
+					backoff *= 2
+				}
+			case <-ctx.Done():
+				return acquiredBy, ctx.Err()
+			}
+		}
+	}
+
+	return acquiredBy, fmt.Errorf("failed to acquire lock %s", lockKey)
+}
+
+// ReleaseLock releases a distributed lock
+func (r *SqlRepo) ReleaseLock(ctx context.Context, lockKey string, nodeID string) error {
+	result := r.db.WithContext(ctx).
+		Where("lock_key = ? AND node_id = ?", lockKey, nodeID).
+		Delete(&NodeSyncLock{})
+
+	if result.Error != nil {
+		return result.Error
+	}
+
+	return nil
+}
+
+// endregion generic distributed locking

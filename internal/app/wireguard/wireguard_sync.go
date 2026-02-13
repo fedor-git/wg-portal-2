@@ -143,3 +143,24 @@ func isNoSuchFile(err error) bool {
 	}
 	return errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "file does not exist")
 }
+
+// SyncAllPeersFromDBWithLock syncs all peers from database using distributed lock
+// Only one node acquires the lock and performs the sync to prevent database contention
+func (m Manager) SyncAllPeersFromDBWithLock(ctx context.Context, nodeID string) (int, error) {
+	if err := domain.ValidateAdminAccessRights(ctx); err != nil {
+		return 0, err
+	}
+
+	// Attempt to acquire distributed lock
+	type syncerWithLock interface {
+		SyncAllPeersFromDBWithLock(context.Context, string) (int, error)
+	}
+
+	if v, ok := any(m.db).(syncerWithLock); ok {
+		return v.SyncAllPeersFromDBWithLock(ctx, nodeID)
+	}
+
+	// Fallback to regular sync without lock
+	slog.Warn("[SYNC] SyncAllPeersFromDBWithLock called but db doesn't support locks, using regular sync", "node_id", nodeID)
+	return m.SyncAllPeersFromDB(ctx)
+}

@@ -1,6 +1,6 @@
 module github.com/fedor-git/wg-portal-2
 
-go 1.24
+go 1.24.0
 
 require (
 	github.com/a8m/envsubst v1.4.3
@@ -24,7 +24,7 @@ require (
 	golang.org/x/crypto v0.41.0
 	golang.org/x/exp v0.0.0-20250808145144-a408d31f581a
 	golang.org/x/oauth2 v0.30.0
-	golang.org/x/sys v0.35.0
+	golang.org/x/sys v0.41.0
 	golang.zx2c4.com/wireguard/wgctrl v0.0.0-20241231184526-a9ab2273dd10
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.6.0

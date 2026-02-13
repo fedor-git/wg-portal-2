@@ -58,6 +58,10 @@ func (s *eventingPeerService) Delete(ctx context.Context, id domain.PeerIdentifi
     return nil
 }
 
+func (s *eventingPeerService) SyncAllPeersFromDBWithLock(ctx context.Context, nodeID string) (int, error) {
+    return s.inner.SyncAllPeersFromDBWithLock(ctx, nodeID)
+}
+
 func (s *eventingPeerService) bumpFanout(ctx context.Context, topic string, arg any) {
     if s.bus == nil || topic == "" { return }
     if app.NoFanout(ctx) { return }
