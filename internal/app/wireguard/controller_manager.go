@@ -172,7 +172,7 @@ func (c *ControllerManager) GetControllerNames() []config.BackendBase {
 func (c *ControllerManager) ListPeers(ctx context.Context, iface string) ([]domain.Peer, error) {
 	// Get interface from database to determine the correct backend
 	ifaceId := domain.InterfaceIdentifier(iface)
-	
+
 	// For now, try local controller first (most common case)
 	localController, exists := c.controllers[config.LocalBackendName]
 	if !exists {
@@ -217,7 +217,7 @@ func (c *ControllerManager) RemovePeer(ctx context.Context, iface string, peerID
 }
 
 func (c *ControllerManager) SavePeer(ctx context.Context, iface string, peer *domain.Peer) error {
-	// Use local controller for interface operations  
+	// Use local controller for interface operations
 	localController, exists := c.controllers[config.LocalBackendName]
 	if !exists {
 		return fmt.Errorf("local interface controller not found")

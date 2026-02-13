@@ -15,10 +15,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/fedor-git/wg-portal-2/internal/app"
 	"github.com/fedor-git/wg-portal-2/internal/app/wireguard"
 	cfgpkg "github.com/fedor-git/wg-portal-2/internal/config"
-	"github.com/fedor-git/wg-portal-2/internal/domain"
 )
 
 type EventBus interface {
@@ -32,20 +30,20 @@ const (
 )
 
 type settings struct {
-	Enabled            bool
-	Peers              []string
-	AuthHeader         string
-	AuthValue          string
-	Timeout            time.Duration
-	Debounce           time.Duration
-	SelfURL            string
-	Origin             string
-	KickOnStart        bool
-	Topics             []string
-	TLSSkipVerify      bool
-	TLSClientCertFile  string
-	TLSClientKeyFile   string
-	TLSCACertFile      string
+	Enabled           bool
+	Peers             []string
+	AuthHeader        string
+	AuthValue         string
+	Timeout           time.Duration
+	Debounce          time.Duration
+	SelfURL           string
+	Origin            string
+	KickOnStart       bool
+	Topics            []string
+	TLSSkipVerify     bool
+	TLSClientCertFile string
+	TLSClientKeyFile  string
+	TLSCACertFile     string
 }
 
 type MetricsServerHealthUpdater interface {
@@ -54,20 +52,20 @@ type MetricsServerHealthUpdater interface {
 
 func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardManager *wireguard.Manager, collector *wireguard.StatisticsCollector, metricsServer MetricsServerHealthUpdater) {
 	s := settings{
-		Enabled:            fc.Enabled,
-		Peers:              append([]string(nil), fc.Peers...),
-		AuthHeader:         fc.AuthHeader,
-		AuthValue:          fc.AuthValue,
-		Timeout:            fc.Timeout,
-		Debounce:           fc.Debounce,
-		SelfURL:            fc.SelfURL,
-		Origin:             fc.Origin,
-		KickOnStart:        fc.KickOnStart,
-		Topics:             append([]string(nil), fc.Topics...),
-		TLSSkipVerify:      fc.TLSSkipVerify,
-		TLSClientCertFile:  fc.TLSClientCertFile,
-		TLSClientKeyFile:   fc.TLSClientKeyFile,
-		TLSCACertFile:      fc.TLSCACertFile,
+		Enabled:           fc.Enabled,
+		Peers:             append([]string(nil), fc.Peers...),
+		AuthHeader:        fc.AuthHeader,
+		AuthValue:         fc.AuthValue,
+		Timeout:           fc.Timeout,
+		Debounce:          fc.Debounce,
+		SelfURL:           fc.SelfURL,
+		Origin:            fc.Origin,
+		KickOnStart:       fc.KickOnStart,
+		Topics:            append([]string(nil), fc.Topics...),
+		TLSSkipVerify:     fc.TLSSkipVerify,
+		TLSClientCertFile: fc.TLSClientCertFile,
+		TLSClientKeyFile:  fc.TLSClientKeyFile,
+		TLSCACertFile:     fc.TLSCACertFile,
 	}
 
 	if !s.Enabled {
@@ -75,7 +73,9 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 		return
 	}
 	if s.Timeout <= 0 {
-		s.Timeout = 5 * time.Second
+		// 60 second timeout for sync endpoint to accommodate large peer counts
+		// (241 peers with database updates + potential retries can exceed 5 seconds)
+		s.Timeout = 60 * time.Second
 	}
 	if s.Debounce <= 0 {
 		s.Debounce = 250 * time.Millisecond
@@ -96,17 +96,18 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 	}
 
 	if len(s.Topics) == 0 {
+		// Peer events are handled by event-driven sync handlers (see wireguard.go)
+		// Fanout only needs interface events for operations that affect all peers (e.g., config changes)
 		s.Topics = []string{
-			"peer:created", "peer:updated", "peer:deleted",
 			"interface:created", "interface:updated", "interface:deleted",
 		}
 	}
 
 	f := &fanout{
-		cfg:            s,
-		client:         createHTTPClient(s),
-		debounce:       newDebouncer(s.Debounce),
-		metricsServer:  metricsServer,
+		cfg:           s,
+		client:        createHTTPClient(s),
+		debounce:      newDebouncer(s.Debounce),
+		metricsServer: metricsServer,
 	}
 	if bus != nil {
 		for _, topic := range s.Topics {
@@ -114,14 +115,8 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 			if err := bus.Subscribe(t, func(arg any) {
 				slog.Debug("[FANOUT] bump", "reason", "bus:"+t, "arg", arg)
 				f.bump("bus:" + t)
-				go func() {
-					sysCtx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
-					sysCtx = app.WithNoFanout(sysCtx)
-					_, err := wireGuardManager.SyncAllPeersFromDB(sysCtx)
-					if err != nil {
-						slog.Error("[FANOUT] SyncAllPeersFromDB failed", "err", err)
-					}
-				}()
+				// Removed: SyncAllPeersFromDB() - now using event-driven sync instead
+				// Each node listens to peer:created, peer:updated, peer:deleted events directly
 			}); err != nil {
 				slog.Warn("[FANOUT] subscribe failed", "topic", t, "err", err)
 			} else {
@@ -176,11 +171,11 @@ func createHTTPClient(s settings) *http.Client {
 		if s.TLSClientCertFile != "" && s.TLSClientKeyFile != "" {
 			cert, err := tls.LoadX509KeyPair(s.TLSClientCertFile, s.TLSClientKeyFile)
 			if err != nil {
-				slog.Warn("[FANOUT] failed to load client certificate", 
+				slog.Warn("[FANOUT] failed to load client certificate",
 					"cert", s.TLSClientCertFile, "key", s.TLSClientKeyFile, "err", err)
 			} else {
 				tlsConfig.Certificates = []tls.Certificate{cert}
-				slog.Debug("[FANOUT] loaded client certificate", 
+				slog.Debug("[FANOUT] loaded client certificate",
 					"cert", s.TLSClientCertFile, "key", s.TLSClientKeyFile)
 			}
 		}
@@ -195,10 +190,10 @@ func createHTTPClient(s settings) *http.Client {
 }
 
 type fanout struct {
-	cfg            settings
-	client         *http.Client
-	debounce       *debouncer
-	metricsServer  MetricsServerHealthUpdater
+	cfg           settings
+	client        *http.Client
+	debounce      *debouncer
+	metricsServer MetricsServerHealthUpdater
 }
 
 func (f *fanout) loop(ctx context.Context) {

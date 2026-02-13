@@ -37,6 +37,13 @@ const TopicPeerUpdated = "peer:updated"
 const TopicPeerInterfaceUpdated = "peer:interface:updated"
 const TopicPeerIdentifierUpdated = "peer:identifier:updated"
 const TopicPeerStateChanged = "peer:state:changed"
+const TopicPeersExpiredRemoved = "peers:expired-removed" // Published when expired peers are deleted (batch operation)
+
+// Event-driven sync topics - contain only peer ID for cross-node synchronization
+// Nodes subscribe to these events and fetch individual peers from database instead of full sync
+const TopicPeerCreatedSync = "peer:created:sync" // Contains domain.PeerIdentifier (string)
+const TopicPeerUpdatedSync = "peer:updated:sync" // Contains domain.PeerIdentifier (string)
+const TopicPeerDeletedSync = "peer:deleted:sync" // Contains domain.PeerIdentifier (string)
 
 // endregion peer-events
 
@@ -48,26 +55,25 @@ const TopicAuditLoginFailed = "audit:login:failed"
 const TopicAuditInterfaceChanged = "audit:interface:changed"
 const TopicAuditPeerChanged = "audit:peer:changed"
 
-
-const TopicFanPeersUpdated     = "peers.updated"
-const TopicFanPeerSave         = "peer.save"
-const TopicFanPeerDelete       = "peer.delete"
-const TopicFanInterfaceSave    = "interface.save"
+const TopicFanPeersUpdated = "peers.updated"
+const TopicFanPeerSave = "peer.save"
+const TopicFanPeerDelete = "peer.delete"
+const TopicFanInterfaceSave = "interface.save"
 const TopicFanInterfaceUpdated = "interface.updated"
 
 // endregion audit-events
 
 type EventPublisher interface {
-    Publish(topic string, args ...any)
+	Publish(topic string, args ...any)
 }
 
 type EventSubscriber interface {
-    Subscribe(topic string, fn interface{}) error
+	Subscribe(topic string, fn interface{}) error
 }
 
 type EventBus interface {
-    EventPublisher
-    EventSubscriber
+	EventPublisher
+	EventSubscriber
 }
 
 // Removed the SubscribeToPeerDelete function as it has been moved to peer_metrics_subscriber.go.

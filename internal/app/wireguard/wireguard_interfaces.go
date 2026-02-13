@@ -598,7 +598,7 @@ func (m Manager) saveInterface(ctx context.Context, iface *domain.Interface) (
 			}
 		}
 		// notify that peers for this interface have changed so config/routes can be updated
-		m.bus.Publish(app.TopicPeerInterfaceUpdated, iface.Identifier)
+		m.bus.Publish(app.TopicPeerInterfaceUpdated, domain.InterfaceIdentifier(iface.Identifier))
 	}
 
 	m.bus.Publish(app.TopicAuditInterfaceChanged, domain.AuditEventWrapper[audit.InterfaceEvent]{

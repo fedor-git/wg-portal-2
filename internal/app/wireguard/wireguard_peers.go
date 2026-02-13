@@ -89,7 +89,7 @@ func (m Manager) GetUserPeers(ctx context.Context, id domain.UserIdentifier) ([]
 		for _, iface := range interfaces {
 			ifaceMap[iface.Identifier] = iface.PeerDefAllowedIPsStr
 		}
-		
+
 		for i := range peers {
 			if peers[i].Interface.Type == domain.InterfaceTypeClient {
 				if allowedIPs, ok := ifaceMap[peers[i].InterfaceIdentifier]; ok {
@@ -142,7 +142,7 @@ func (m Manager) PreparePeer(ctx context.Context, id domain.InterfaceIdentifier)
 	}
 
 	peerId := domain.PeerIdentifier(kp.PublicKey)
-	
+
 	// For WireGuard kernel: use client's IP addresses (prevents overlapping AllowedIPs)
 	// Convert peer addresses to /32 (IPv4) or /128 (IPv6) host addresses
 	hostAddrs := make([]domain.Cidr, len(ips))
@@ -150,7 +150,7 @@ func (m Manager) PreparePeer(ctx context.Context, id domain.InterfaceIdentifier)
 		hostAddrs[i] = ip.HostAddr()
 	}
 	peerAllowedIPs := domain.CidrsToString(hostAddrs)
-	
+
 	freshPeer := &domain.Peer{
 		BaseModel: domain.BaseModel{
 			CreatedBy: string(currentUser.Id),
@@ -211,7 +211,7 @@ func (m Manager) GetPeer(ctx context.Context, id domain.PeerIdentifier) (*domain
 		"peer_type", peer.Interface.Type,
 		"allowed_ips_before", peer.AllowedIPsStr.Value,
 		"iface_err", err)
-	
+
 	if err == nil && peer.Interface.Type == domain.InterfaceTypeClient {
 		slog.Debug("GetPeer overriding AllowedIPsStr",
 			"peer_id", peer.Identifier,
@@ -219,7 +219,7 @@ func (m Manager) GetPeer(ctx context.Context, id domain.PeerIdentifier) (*domain
 			"new_value", iface.PeerDefAllowedIPsStr)
 		peer.AllowedIPsStr.Value = iface.PeerDefAllowedIPsStr
 	}
-	
+
 	slog.Debug("GetPeer after override",
 		"peer_id", peer.Identifier,
 		"allowed_ips_after", peer.AllowedIPsStr.Value)
@@ -294,7 +294,8 @@ func (m Manager) CreatePeer(ctx context.Context, peer *domain.Peer) (*domain.Pee
 		return nil, fmt.Errorf("creation failure: %w", err)
 	}
 
-	m.bus.Publish(app.TopicPeerCreated, *peer)
+	m.bus.Publish(app.TopicPeerCreated, *peer)               // Webhooks receive full peer
+	m.bus.Publish(app.TopicPeerCreatedSync, peer.Identifier) // Other nodes receive only ID for event-driven sync
 
 	return peer, nil
 }
@@ -335,6 +336,7 @@ func (m Manager) CreateMultiplePeers(
 		createdPeers = append(createdPeers, *freshPeer)
 
 		m.bus.Publish(app.TopicPeerCreated, *freshPeer)
+		m.bus.Publish(app.TopicPeerCreatedSync, freshPeer.Identifier)
 	}
 
 	return createdPeers, nil
@@ -404,7 +406,8 @@ func (m Manager) UpdatePeer(ctx context.Context, peer *domain.Peer) (*domain.Pee
 		}
 	}
 
-	m.bus.Publish(app.TopicPeerUpdated, *peer)
+	m.bus.Publish(app.TopicPeerUpdated, *peer)               // Webhooks receive full peer
+	m.bus.Publish(app.TopicPeerUpdatedSync, peer.Identifier) // Other nodes receive only ID for event-driven sync
 
 	return peer, nil
 }
@@ -439,7 +442,8 @@ func (m Manager) DeletePeer(ctx context.Context, id domain.PeerIdentifier) error
 		return fmt.Errorf("failed to delete peer %s: %w", id, err)
 	}
 
-	m.bus.Publish(app.TopicPeerDeleted, *peer)
+	m.bus.Publish(app.TopicPeerDeleted, *peer)               // Webhooks receive full peer
+	m.bus.Publish(app.TopicPeerDeletedSync, peer.Identifier) // Other nodes receive only ID for event-driven sync
 	// Update routes after peers have changed
 	m.bus.Publish(app.TopicRouteUpdate, "peers updated")
 	// Update interface after peers have changed
@@ -490,7 +494,7 @@ func (m Manager) GetUserPeerStats(ctx context.Context, id domain.UserIdentifier)
 
 func (m Manager) savePeers(ctx context.Context, peers ...*domain.Peer) error {
 	interfaces := make(map[domain.InterfaceIdentifier]struct{})
-	
+
 	for _, peer := range peers {
 		iface, err := m.db.GetInterface(ctx, peer.InterfaceIdentifier)
 		if err != nil {
@@ -510,13 +514,13 @@ func (m Manager) savePeers(ctx context.Context, peers ...*domain.Peer) error {
 			if err != nil {
 				return nil, fmt.Errorf("failed to save wireguard peer %s: %w", peer.Identifier, err)
 			}
-			
+
 			return peer, nil
 		})
 		if err != nil {
 			return fmt.Errorf("save failure for peer %s: %w", peer.Identifier, err)
 		}
-		
+
 		slog.Debug("savePeers: adding peer to wg0.conf", "iface", peer.InterfaceIdentifier, "peer", peer.Identifier)
 
 		// publish event

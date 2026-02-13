@@ -200,3 +200,14 @@ func (s *PeerService) SyncAllPeersFromDB(ctx context.Context) (int, error) {
 
 	return 0, fmt.Errorf("sync not supported by current peers backend")
 }
+
+func (s *PeerService) SyncAllPeersFromDBWithLock(ctx context.Context, nodeID string) (int, error) {
+	type syncerWithLock interface {
+		SyncAllPeersFromDBWithLock(context.Context, string) (int, error)
+	}
+	if v, ok := any(s.peers).(syncerWithLock); ok {
+		return v.SyncAllPeersFromDBWithLock(ctx, nodeID)
+	}
+
+	return 0, fmt.Errorf("sync with lock not supported by current peers backend")
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"os"
 
 	"github.com/go-pkgz/routegroup"
 
@@ -24,6 +25,7 @@ type PeerService interface {
 	Update(context.Context, domain.PeerIdentifier, *domain.Peer) (*domain.Peer, error)
 	Delete(context.Context, domain.PeerIdentifier) error
 	SyncAllPeersFromDB(ctx context.Context) (int, error)
+	SyncAllPeersFromDBWithLock(ctx context.Context, nodeID string) (int, error)
 }
 
 type PeerEndpoint struct {
@@ -366,14 +368,28 @@ func (e PeerEndpoint) handleSyncPost() http.HandlerFunc {
             ctx = app.WithNoFanout(ctx)
             slog.Debug("/api/v1/peer/sync: NoEcho header detected, disabling fanout")
         }
-        count, err := e.peers.SyncAllPeersFromDB(ctx)
+        
+        // Get node ID from header (identifies which node is sending the sync request)
+        nodeID := r.Header.Get("X-WGP-Origin")
+        if nodeID == "" {
+            // Fallback: try to use hostname as node identifier
+            hostname, _ := os.Hostname()
+            nodeID = hostname
+            if nodeID == "" {
+                nodeID = "unknown-node"
+            }
+        }
+        
+        // Use distributed lock to ensure only one node syncs at a time
+        // This prevents database contention and 504 Gateway Timeout cascades
+        count, err := e.peers.SyncAllPeersFromDBWithLock(ctx, nodeID)
         if err != nil { 
-            slog.Error("/api/v1/peer/sync: SyncAllPeersFromDB failed", "error", err)
+            slog.Error("/api/v1/peer/sync: SyncAllPeersFromDBWithLock failed", "error", err, "node_id", nodeID)
             respond.JSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
             return
         }
         
-        slog.Info("/api/v1/peer/sync: SyncAllPeersFromDB completed", "synced", count)
+        slog.Info("/api/v1/peer/sync: sync completed", "synced", count, "node_id", nodeID)
         
         // Force interface update events after sync, even with NoFanout
         // This ensures config files and routes are updated after peer sync
@@ -382,10 +398,10 @@ func (e PeerEndpoint) handleSyncPost() http.HandlerFunc {
         if err != nil {
             slog.Warn("failed to get interfaces for update events", "error", err)
             // Fallback to hardcoded interface if we can't get interfaces
-            e.publish(app.TopicPeerInterfaceUpdated, "wg0")
+            e.publish(app.TopicPeerInterfaceUpdated, domain.InterfaceIdentifier("wg0"))
         } else {
             for _, iface := range interfaces {
-                e.publish(app.TopicPeerInterfaceUpdated, iface.Identifier)
+                e.publish(app.TopicPeerInterfaceUpdated, domain.InterfaceIdentifier(iface.Identifier))
             }
         }
         
