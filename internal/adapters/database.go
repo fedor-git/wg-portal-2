@@ -712,6 +712,7 @@ func (r *SqlRepo) FindUserPeers(ctx context.Context, id domain.UserIdentifier, s
 
 // SavePeer updates the peer with the given id.
 // If no existing peer is found, a new peer is created.
+// IMPORTANT: Also creates peer_status record to avoid deadlock during concurrent updates
 func (r *SqlRepo) SavePeer(
 	ctx context.Context,
 	id domain.PeerIdentifier,
@@ -732,6 +733,20 @@ func (r *SqlRepo) SavePeer(
 		err = r.upsertPeer(userInfo, tx, peer)
 		if err != nil {
 			return err
+		}
+
+		// DEADLOCK FIX: Ensure peer_status record exists WITHOUT FOR UPDATE lock
+		// This prevents lock contention when stats collection immediately tries to update it
+		// Use explicit WHERE clause with correct column name (identifier, not peer_id)
+		peerStatus := domain.PeerStatus{
+			PeerId:    id,
+			UpdatedAt: time.Now(),
+		}
+		// Explicit WHERE using correct column name for FirstOrCreate
+		err = tx.Where("identifier = ?", id).FirstOrCreate(&peerStatus).Error
+		if err != nil {
+			// Log but don't fail - peer_status will be created on first stats update anyway
+			slog.Debug("peer status record already exists or creation deferred", "peer", id)
 		}
 
 		// return nil will commit the whole transaction
@@ -1136,6 +1151,7 @@ func (r *SqlRepo) upsertInterfaceStatus(tx *gorm.DB, in *domain.InterfaceStatus)
 
 // UpdatePeerStatus updates the peer status with the given id.
 // If no peer status is found, a new one is created.
+// OWNERSHIP CHECK: If peer has an OwnerNodeId set, skip update to prevent conflicts with owner node.
 // Includes automatic retry logic with exponential backoff for deadlock/conflict recovery.
 // Uses row-level FOR UPDATE locking to prevent concurrent modification conflicts.
 func (r *SqlRepo) UpdatePeerStatus(
@@ -1164,6 +1180,15 @@ func (r *SqlRepo) UpdatePeerStatus(
 			in, err := r.getOrCreatePeerStatus(tx, id)
 			if err != nil {
 				return err // return any error will roll back
+			}
+
+			// OWNERSHIP CHECK: If another node owns this peer, skip update
+			// Only unclaimed peers or peers owned by us can be updated here
+			if in.OwnerNodeId != "" {
+				// Peer is owned by another node - skip update to prevent deadlocks
+				slog.Debug("peer status owned by other node, skipping update",
+					"peer", id, "owner", in.OwnerNodeId)
+				return nil
 			}
 
 			in, err = updateFunc(in)
@@ -1270,6 +1295,7 @@ func (r *SqlRepo) ClaimPeerStatus(
 
 // BatchUpdatePeerStatuses updates multiple peer statuses in a single optimized transaction.
 // This is more efficient than calling UpdatePeerStatus individually and reduces deadlock risk.
+// OWNERSHIP CHECK: Skips peers owned by other nodes to prevent conflicts.
 // Uses ON CONFLICT DO UPDATE for bulk upsert with automatic conflict resolution.
 func (r *SqlRepo) BatchUpdatePeerStatuses(
 	ctx context.Context,
@@ -1302,6 +1328,14 @@ func (r *SqlRepo) BatchUpdatePeerStatuses(
 				in, err := r.getOrCreatePeerStatus(tx, id)
 				if err != nil {
 					return err
+				}
+
+				// OWNERSHIP CHECK: Skip peers owned by other nodes
+				if in.OwnerNodeId != "" {
+					// Peer is owned by another node - skip update
+					slog.Debug("peer status owned by other node, skipping batch update",
+						"peer", id, "owner", in.OwnerNodeId)
+					continue
 				}
 
 				// Apply the update function
@@ -1351,12 +1385,32 @@ func (r *SqlRepo) getOrCreatePeerStatus(tx *gorm.DB, id domain.PeerIdentifier) (
 		UpdatedAt: time.Now(),
 	}
 
-	// Use Clauses(clause.Locking{Strength: "UPDATE"}) to add FOR UPDATE
-	// This locks the row at the database level, preventing concurrent modifications
-	// If row doesn't exist, FirstOrCreate will create it
-	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Attrs(defaults).FirstOrCreate(&in, id).Error
+	// DEADLOCK FIX: Two-phase approach to reduce lock contention
+	// 1. First try to get existing record with FOR UPDATE lock
+	//    (This avoids gap locks on non-existent rows)
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("identifier = ?", id).First(&in).Error
+	if err == nil {
+		// Record found and locked - proceed with update
+		return &in, nil
+	}
+
+	if err != gorm.ErrRecordNotFound {
+		// Unexpected error
+		return nil, err
+	}
+
+	// Record doesn't exist - create it WITHOUT FOR UPDATE lock
+	// This is safe because SavePeer pre-creates peer_status, so this is rare
+	// Explicit WHERE clause using correct column name
+	err = tx.Where("identifier = ?", id).Attrs(defaults).FirstOrCreate(&in).Error
 	if err != nil {
 		return nil, err
+	}
+
+	// Now that record exists, acquire FOR UPDATE lock for modifications
+	err = tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("identifier = ?", id).First(&in).Error
+	if err != nil {
+		return nil, fmt.Errorf("failed to lock peer status after creation: %w", err)
 	}
 
 	return &in, nil

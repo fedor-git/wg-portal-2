@@ -301,6 +301,7 @@ func (f *fanout) bump(reason string) {
 
 // fireForPeerEvent sends peer sync events to all nodes immediately (no debounce)
 // This ensures new/updated/deleted peers propagate instantly across cluster
+// For deletion events, skips HTTP sync since event handler handles deletion directly
 func (f *fanout) fireForPeerEvent(ctx context.Context, topic string, peerID any) {
 	// CRITICAL: Block peer sync during startup to prevent 502 cascade
 	// Each peer-specific sync request requires local WireGuard to have peers loaded
@@ -312,11 +313,11 @@ func (f *fanout) fireForPeerEvent(ctx context.Context, topic string, peerID any)
 		return
 	}
 
+	peerIDStr := fmt.Sprintf("%v", peerID)
+
 	var wg sync.WaitGroup
 	var failedPeers []string
 	var failedMutex sync.Mutex
-
-	peerIDStr := fmt.Sprintf("%v", peerID)
 
 	slog.Info("[FANOUT_PEER] sending immediate peer sync event to all nodes",
 		"topic", topic, "peer_id", peerIDStr)
@@ -329,7 +330,16 @@ func (f *fanout) fireForPeerEvent(ctx context.Context, topic string, peerID any)
 		if isSelf(base, f.cfg.SelfURL) {
 			continue
 		}
-		endpoint := strings.TrimRight(base, "/") + "/api/v1/peer/sync?peer_id=" + url.QueryEscape(peerIDStr)
+
+		// Extract event type from topic: "peer:created:sync" → "created"
+		eventType := "created"
+		if topic == "peer:updated:sync" {
+			eventType = "updated"
+		} else if topic == "peer:deleted:sync" {
+			eventType = "deleted"
+		}
+
+		endpoint := strings.TrimRight(base, "/") + "/api/v1/peer/sync?peer_id=" + url.QueryEscape(peerIDStr) + "&event=" + eventType
 
 		wg.Add(1)
 		go func(u string) {

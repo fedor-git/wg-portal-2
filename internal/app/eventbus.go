@@ -45,6 +45,11 @@ const TopicPeerCreatedSync = "peer:created:sync" // Contains domain.PeerIdentifi
 const TopicPeerUpdatedSync = "peer:updated:sync" // Contains domain.PeerIdentifier (string)
 const TopicPeerDeletedSync = "peer:deleted:sync" // Contains domain.PeerIdentifier (string)
 
+// Local sync topics - for HTTP endpoint to trigger local WireGuard sync without triggering fanout
+// These are NOT fanned out to other nodes (fanout doesn't subscribe to these)
+// They only trigger local WireGuard manager to sync the peer
+const TopicPeerSyncedLocal = "peer:synced:local" // HTTP endpoint publishes this after fanout calls it, prevents loop
+
 // endregion peer-events
 
 // region audit-events
