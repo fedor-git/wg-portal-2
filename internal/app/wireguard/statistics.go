@@ -266,134 +266,118 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 				}
 
 				// Process WireGuard peers
+				// OPTIMIZATION: Only update peers that are connected (handshake < 2min) or changed state
+				// Offline peers are updated only when they transition state, not on every collection cycle
+				// This prevents deadlocks from constant updates on all 100+ peers from 24 cluster nodes
 				for _, peer := range wireguardPeers {
 					var connectionStateChanged bool
 					var newPeerStatus domain.PeerStatus
 
-					// If peer has a recent handshake, claim ownership for this node
+					// Check if peer is currently connected (recent handshake)
 					isConnected := !peer.LastHandshake.IsZero() && peer.LastHandshake.After(time.Now().Add(-2*time.Minute))
 
+					var lastHandshake *time.Time
+					if !peer.LastHandshake.IsZero() {
+						lastHandshake = &peer.LastHandshake
+					}
+
+					// CRITICAL: Build update function to check if we really need to write to DB
+					updateFunc := func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
+						wasConnected := p.IsConnected
+
+						// Skip offline peers if state hasn't changed - don't write to DB
+						// This is the key optimization: offline peers write rarely
+						if !isConnected && !wasConnected {
+							// Peer remains offline - check if anything meaningful changed
+							bytesReceivedChanged := p.BytesReceived != peer.BytesUpload
+							bytesTransmittedChanged := p.BytesTransmitted != peer.BytesDownload
+							endpointChanged := p.Endpoint != peer.Endpoint
+							handshakeChanged := p.LastHandshake != lastHandshake
+
+							slog.Debug("checking offline peer changes",
+								"peer", peer.Identifier,
+								"bytes_received_changed", bytesReceivedChanged,
+								"bytes_transmitted_changed", bytesTransmittedChanged,
+								"endpoint_changed", endpointChanged,
+								"handshake_changed", handshakeChanged)
+
+							if !bytesReceivedChanged && !bytesTransmittedChanged && !endpointChanged && !handshakeChanged {
+								// Nothing changed for offline peer - return without modifying
+								slog.Debug("peer remains offline, skipping DB update", "peer", peer.Identifier, "lastHandshake", lastHandshake)
+								return p, nil
+							}
+						}
+
+						// For connected peers or state transitions: update the record
+						slog.Debug("updating peer status in database",
+							"peer", peer.Identifier,
+							"was_connected", wasConnected,
+							"is_connected_now", isConnected,
+							"last_handshake_old", p.LastHandshake,
+							"last_handshake_new", lastHandshake)
+
+						p.UpdatedAt = time.Now()
+						p.LastSessionStart = getSessionStartTime(*p, peer.BytesUpload, peer.BytesDownload, lastHandshake)
+						p.BytesReceived = peer.BytesUpload
+						p.BytesTransmitted = peer.BytesDownload
+						p.Endpoint = peer.Endpoint
+						p.LastHandshake = lastHandshake
+
+						// CRITICAL FIX: When ping checks are disabled, force IsPingable=false
+						// This ensures CalcConnected() uses ONLY handshake-based logic
+						// Without this, old IsPingable=true would keep peer ONLINE despite old handshake
+						if !c.cfg.Statistics.UsePingChecks {
+							p.IsPingable = false
+							slog.Debug("ping disabled, setting IsPingable=false", "peer", peer.Identifier)
+						}
+
+						p.CalcConnected()
+
+						// Log state transitions
+						if wasConnected != p.IsConnected {
+							slog.Info("peer connection state changed", "peer", peer.Identifier, "was_connected", wasConnected, "now_connected", p.IsConnected, "lastHandshake", lastHandshake)
+							connectionStateChanged = true
+							newPeerStatus = *p
+						} else {
+							slog.Info("peer status updated", "peer", peer.Identifier, "connected", p.IsConnected, "is_pingable", p.IsPingable, "lastHandshake", lastHandshake)
+						}
+
+						// Update prometheus metrics async
+						go c.updatePeerMetrics(context.Background(), *p)
+
+						return p, nil
+					}
+
+					// Update strategy:
+					// - Connected peers: claim ownership via ClaimPeerStatus (only one node owns it)
+					// - Offline peers: just update via UpdatePeerStatus (rare writes due to no-change early return)
 					var err error
 					if isConnected {
-						// Claim ownership since peer is connected to this node
-						err = c.db.ClaimPeerStatus(ctx, peer.Identifier, c.cfg.Core.ClusterNodeId,
-							func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
-								wasConnected := p.IsConnected
-
-								var lastHandshake *time.Time
-								if !peer.LastHandshake.IsZero() {
-									lastHandshake = &peer.LastHandshake
-								}
-
-								// OPTIMIZATION: Check if stats actually changed before updating
-								// Skip update if bytes and handshake haven't changed
-								statsChanged := p.BytesReceived != peer.BytesUpload ||
-									p.BytesTransmitted != peer.BytesDownload ||
-									(lastHandshake == nil) != (p.LastHandshake == nil) ||
-									(lastHandshake != nil && p.LastHandshake != nil && !lastHandshake.Equal(*p.LastHandshake)) ||
-									p.Endpoint != peer.Endpoint
-
-								if !statsChanged && p.IsConnected {
-									// Nothing changed for this connected peer - skip update
-									return p, nil
-								}
-
-								// calculate if session was restarted
-								p.UpdatedAt = time.Now()
-								p.LastSessionStart = getSessionStartTime(*p, peer.BytesUpload, peer.BytesDownload,
-									lastHandshake)
-								p.BytesReceived = peer.BytesUpload      // store bytes that where uploaded from the peer and received by the server
-								p.BytesTransmitted = peer.BytesDownload // store bytes that where received from the peer and sent by the server
-								p.Endpoint = peer.Endpoint
-								p.LastHandshake = lastHandshake
-								p.CalcConnected()
-
-								if wasConnected != p.IsConnected {
-									slog.Debug("peer connection state changed", "peer", peer.Identifier, "connected", p.IsConnected)
-									connectionStateChanged = true
-									newPeerStatus = *p // store new status for event publishing
-								}
-
-								// Update prometheus metrics
-								go c.updatePeerMetrics(ctx, *p)
-
-								return p, nil
-							})
+						// This node should manage connected peer - claim ownership
+						slog.Info("claiming connected peer", "peer", peer.Identifier, "node_id", c.cfg.Core.ClusterNodeId)
+						err = c.db.ClaimPeerStatus(ctx, peer.Identifier, c.cfg.Core.ClusterNodeId, updateFunc)
 						if err != nil {
-							slog.Warn("failed to claim and update peer status", "peer", peer.Identifier, "node", c.cfg.Core.ClusterNodeId, "error", err)
+							slog.Warn("failed to claim connected peer", "peer", peer.Identifier, "error", err)
 						} else {
-							slog.Debug("claimed and updated peer status", "peer", peer.Identifier, "node", c.cfg.Core.ClusterNodeId)
+							slog.Debug("claimed connected peer", "peer", peer.Identifier)
 						}
 					} else {
-						// Peer is not connected to this node, just update (don't claim)
-						err = c.db.UpdatePeerStatus(ctx, peer.Identifier,
-							func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
-								wasConnected := p.IsConnected
-
-								var lastHandshake *time.Time
-								if !peer.LastHandshake.IsZero() {
-									lastHandshake = &peer.LastHandshake
-								}
-
-								// OPTIMIZATION: Only update disconnected/idle peers if they actually changed state
-								// Skip update if peer remains disconnected and nothing meaningful changed
-								if !wasConnected && !isConnected {
-									// Peer was and remains disconnected
-									// Only update if there are new bytes or it transitioned state
-									if p.BytesReceived == peer.BytesUpload &&
-										p.BytesTransmitted == peer.BytesDownload &&
-										!p.IsConnected {
-										// Nothing changed - skip database write
-										return p, nil
-									}
-								}
-
-								// calculate if session was restarted
-								p.UpdatedAt = time.Now()
-								p.LastSessionStart = getSessionStartTime(*p, peer.BytesUpload, peer.BytesDownload,
-									lastHandshake)
-								p.BytesReceived = peer.BytesUpload      // store bytes that where uploaded from the peer and received by the server
-								p.BytesTransmitted = peer.BytesDownload // store bytes that where received from the peer and sent by the server
-								p.Endpoint = peer.Endpoint
-								p.LastHandshake = lastHandshake
-								p.CalcConnected()
-
-								if wasConnected != p.IsConnected {
-									slog.Debug("peer connection state changed", "peer", peer.Identifier, "connected", p.IsConnected)
-									connectionStateChanged = true
-									newPeerStatus = *p // store new status for event publishing
-								}
-
-								// Update prometheus metrics
-								go c.updatePeerMetrics(ctx, *p)
-
-								return p, nil
-							})
+						// Offline peer - update only if state changed (via updateFunc early-return optimization)
+						slog.Info("updating offline peer", "peer", peer.Identifier, "node_id", c.cfg.Core.ClusterNodeId)
+						err = c.db.UpdatePeerStatus(ctx, peer.Identifier, updateFunc)
 						if err != nil {
-							slog.Warn("failed to update peer status", "peer", peer.Identifier, "error", err)
-						} else {
-							slog.Debug("updated peer status", "peer", peer.Identifier)
+							slog.Warn("failed to update offline peer", "peer", peer.Identifier, "error", err)
 						}
 					}
 
 					if connectionStateChanged {
+						// Publish state change event only if this peer changed state
 						peerModel, err := c.db.GetPeer(ctx, peer.Identifier)
 						if err != nil {
-							slog.Error("failed to fetch peer for data collection", "peer", peer.Identifier, "error",
-								err)
+							slog.Warn("failed to fetch peer for event", "peer", peer.Identifier, "error", err)
 							continue
 						}
-						// publish event if connection state changed
 						c.bus.Publish(app.TopicPeerStateChanged, newPeerStatus, *peerModel)
-					}
-
-					// Spread out peer updates across time to avoid connection pool exhaustion
-					// 100ms per peer spreads all peers across ~29 seconds per collection cycle
-					// This ensures no burst of concurrent database queries
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(100 * time.Millisecond):
 					}
 				}
 			}
@@ -434,6 +418,7 @@ func getSessionStartTime(
 
 func (c *StatisticsCollector) startPingWorkers(ctx context.Context) {
 	if !c.cfg.Statistics.UsePingChecks {
+		slog.Info("ping checks disabled in configuration")
 		return
 	}
 
@@ -449,6 +434,8 @@ func (c *StatisticsCollector) startPingWorkers(ctx context.Context) {
 	for i := 0; i < c.cfg.Statistics.PingCheckWorkers; i++ {
 		go c.pingWorker(ctx)
 	}
+
+	slog.Info("ping workers started", "workers", c.cfg.Statistics.PingCheckWorkers)
 
 	// start cleanup goroutine
 	go func() {
@@ -469,6 +456,7 @@ func (c *StatisticsCollector) startPingWorkers(ctx context.Context) {
 		}
 	}()
 
+	slog.Info("ping workers started", "workers", c.cfg.Statistics.PingCheckWorkers)
 	slog.Debug("scheduled ping checks to start after 30 seconds")
 }
 
@@ -508,6 +496,7 @@ func (c *StatisticsCollector) enqueuePingChecks(ctx context.Context) {
 
 func (c *StatisticsCollector) pingWorker(ctx context.Context) {
 	defer c.pingWaitGroup.Done()
+	slog.Info("ping worker started", "node_id", c.cfg.Core.ClusterNodeId)
 	for job := range c.pingJobs {
 		peer := job.Peer
 		backend := job.Backend
@@ -515,12 +504,14 @@ func (c *StatisticsCollector) pingWorker(ctx context.Context) {
 		var connectionStateChanged bool
 		var newPeerStatus domain.PeerStatus
 
+		slog.Info("processing peer status check", "peer", peer.Identifier, "interface", peer.InterfaceIdentifier)
+
 		// OPTIMIZATION: Use WireGuard kernel LastHandshakeTime instead of ICMP ping checks
 		// This is more reliable (real activity) and has zero CPU overhead
 		// Get all physical peers from WireGuard kernel to extract LastHandshake timestamp
 		physicalPeers, err := c.wg.GetControllerByName(backend).GetPeers(ctx, peer.InterfaceIdentifier)
 		if err != nil {
-			slog.Debug("failed to get physical peers for last handshake check", "interface", peer.InterfaceIdentifier, "error", err)
+			slog.Warn("failed to get physical peers for last handshake check", "interface", peer.InterfaceIdentifier, "error", err)
 			// If we can't get peer data, skip status update
 			continue
 		}
@@ -535,10 +526,12 @@ func (c *StatisticsCollector) pingWorker(ctx context.Context) {
 		}
 
 		if physicalPeer == nil {
-			slog.Debug("peer not found in WireGuard kernel", "peer", peer.Identifier, "interface", peer.InterfaceIdentifier)
+			slog.Warn("peer not found in WireGuard kernel", "peer", peer.Identifier, "interface", peer.InterfaceIdentifier)
 			// If peer not in kernel, skip status update
 			continue
 		}
+
+		slog.Info("found peer in WireGuard", "peer", peer.Identifier, "lastHandshake", physicalPeer.LastHandshake)
 
 		// Update peer status based on WireGuard LastHandshakeTime (not ping)
 		err = c.db.UpdatePeerStatus(ctx, peer.Identifier,
@@ -560,7 +553,7 @@ func (c *StatisticsCollector) pingWorker(ctx context.Context) {
 				if wasConnected != p.IsConnected {
 					connectionStateChanged = true
 					newPeerStatus = *p // store new status for event publishing
-					slog.Debug("peer connection state changed", "peer", peer.Identifier, "wasConnected", wasConnected, "nowConnected", p.IsConnected, "lastHandshake", p.LastHandshake)
+					slog.Info("peer connection state changed", "peer", peer.Identifier, "was", wasConnected, "now", p.IsConnected, "lastHandshake", p.LastHandshake)
 				}
 
 				// Update prometheus metrics async
@@ -571,7 +564,8 @@ func (c *StatisticsCollector) pingWorker(ctx context.Context) {
 		if err != nil {
 			slog.Warn("failed to update peer handshake status", "peer", peer.Identifier, "error", err)
 		} else {
-			slog.Debug("updated peer status from WireGuard LastHandshakeTime", "peer", peer.Identifier, "lastHandshake", physicalPeer.LastHandshake)
+			isNowConnected := physicalPeer.LastHandshake.After(time.Now().Add(-2 * time.Minute))
+			slog.Info("updated peer status from WireGuard", "peer", peer.Identifier, "lastHandshake", physicalPeer.LastHandshake, "now_connected", isNowConnected)
 		}
 
 		if connectionStateChanged {

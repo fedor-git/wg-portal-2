@@ -1160,15 +1160,19 @@ func (r *SqlRepo) UpdatePeerStatus(
 	updateFunc func(in *domain.PeerStatus) (*domain.PeerStatus, error),
 ) error {
 	// Retry logic with exponential backoff for deadlocks and conflicts
-	// Increased to 5 retries (50ms, 100ms, 200ms, 400ms, 800ms total ~1.6s) for multi-node scenarios
-	const maxRetries = 5
+	// Increased to 10 retries (50ms, 100ms, 200ms, 400ms, 800ms, 1.6s, 3.2s, 6.4s, 12.8s, 25.6s)
+	// This handles high-concurrency scenarios with 24 cluster nodes and 100+ peers
+	// Total max wait time: ~50 seconds for all retries
+	const maxRetries = 10
 	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
-			// Longer delays give other nodes time to release locks
-			waitTime := time.Duration(50*(1<<uint(attempt-1))) * time.Millisecond
+			// Exponential backoff with jitter to reduce synchronized retries
+			// Base: 50ms * 2^(attempt-1) + random 0-50ms jitter
+			baseWait := time.Duration(50*(1<<uint(attempt-1))) * time.Millisecond
+			jitter := time.Duration(rand.Intn(50)) * time.Millisecond
+			waitTime := baseWait + jitter
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -1182,18 +1186,33 @@ func (r *SqlRepo) UpdatePeerStatus(
 				return err // return any error will roll back
 			}
 
-			// OWNERSHIP CHECK: If another node owns this peer, skip update
-			// Only unclaimed peers or peers owned by us can be updated here
-			if in.OwnerNodeId != "" {
-				// Peer is owned by another node - skip update to prevent deadlocks
-				slog.Debug("peer status owned by other node, skipping update",
-					"peer", id, "owner", in.OwnerNodeId)
+			// OWNERSHIP CHECK: Only skip if peer is CONNECTED and owned by another node
+			// Allow updates for:
+			// 1. Peers not owned by anyone (OwnerNodeId = "")
+			// 2. Peers owned by us (OwnerNodeId == our node)
+			// 3. OFFLINE peers even if owned by another node (they may be transitioning offline)
+			//
+			// Skip only if:
+			// - Peer is CONNECTED AND owned by another node
+			if in.IsConnected && in.OwnerNodeId != "" && in.OwnerNodeId != r.cfg.Core.ClusterNodeId {
+				// Peer is CONNECTED and managed by another node - skip to prevent conflicts
+				slog.Debug("peer status owned by other node and is connected, skipping update",
+					"peer", id, "owner", in.OwnerNodeId, "our_node", r.cfg.Core.ClusterNodeId)
 				return nil
 			}
 
+			// Allow update to proceed - call updateFunc
 			in, err = updateFunc(in)
 			if err != nil {
 				return err
+			}
+
+			// CRITICAL: When peer transitions to OFFLINE, clear its ownership
+			// This allows any node to update it in future cycles
+			if !in.IsConnected && in.OwnerNodeId != "" {
+				slog.Debug("clearing peer ownership on offline transition",
+					"peer", id, "old_owner", in.OwnerNodeId)
+				in.OwnerNodeId = ""
 			}
 
 			err = r.upsertPeerStatus(tx, in)
@@ -1235,15 +1254,18 @@ func (r *SqlRepo) ClaimPeerStatus(
 	}
 
 	// Retry logic with exponential backoff for deadlocks and conflicts
-	// Increased to 5 retries for multi-node ownership claiming
-	const maxRetries = 5
+	// Increased to 10 retries for high-concurrency multi-node ownership claiming
+	// Total max wait time: ~50 seconds for all retries
+	const maxRetries = 10
 	var lastErr error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
-			// Exponential backoff: 50ms, 100ms, 200ms, 400ms, 800ms
-			// Longer delays give other nodes time to release locks
-			waitTime := time.Duration(50*(1<<uint(attempt-1))) * time.Millisecond
+			// Exponential backoff with jitter to reduce synchronized retries
+			// Base: 50ms * 2^(attempt-1) + random 0-50ms jitter
+			baseWait := time.Duration(50*(1<<uint(attempt-1))) * time.Millisecond
+			jitter := time.Duration(rand.Intn(50)) * time.Millisecond
+			waitTime := baseWait + jitter
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
