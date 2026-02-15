@@ -75,7 +75,11 @@ func (e PeerEndpoint) RegisterRoutes(g *routegroup.Bundle) {
 	apiGroup.With(e.authenticator.LoggedIn(ScopeAdmin)).HandleFunc("POST /new", e.handleCreatePost())
 	apiGroup.With(e.authenticator.LoggedIn(ScopeAdmin)).HandleFunc("PUT /by-id/{id}", e.handleUpdatePut())
 	apiGroup.With(e.authenticator.LoggedIn(ScopeAdmin)).HandleFunc("DELETE /by-id/{id}", e.handleDelete())
-	apiGroup.With(e.authenticator.LoggedIn(ScopeAdmin)).HandleFunc("POST /sync", e.handleSyncPost())
+
+	// POST /sync is for node-to-node fanout calls (no authentication required)
+	// These are server-to-server sync calls via fanout, not user-initiated
+	// Fanout includes auth header for optional validation if needed
+	apiGroup.HandleFunc("POST /sync", e.handleSyncPost())
 
 }
 
@@ -385,32 +389,59 @@ func (e PeerEndpoint) handleSyncPost() http.HandlerFunc {
 		// Check if this is a peer-specific sync (from fanout peer event)
 		// or full sync (from periodic interface event or startup)
 		peerID := r.URL.Query().Get("peer_id")
+		eventType := r.URL.Query().Get("event") // "created", "updated", or "deleted"
+		noEcho := r.Header.Get("X-WGP-NoEcho") == "1"
 
 		if peerID != "" {
 			// Peer-specific sync: sync only this one peer to local WireGuard
 			slog.Info("/api/v1/peer/sync: peer-specific sync",
-				"peer_id", peerID, "node_id", nodeID)
+				"peer_id", peerID, "event", eventType, "node_id", nodeID, "from_fanout", noEcho)
 
 			// Get the specific peer from database
 			peer, err := e.peers.GetById(ctx, domain.PeerIdentifier(peerID))
 			if err != nil {
-				slog.Warn("/api/v1/peer/sync: failed to get peer",
-					"peer_id", peerID, "error", err)
-				respond.JSON(w, http.StatusNotFound, map[string]any{
-					"error":   "peer not found",
-					"peer_id": peerID,
-				})
+				// Peer not found - this is normal for deletion events (peer already deleted)
+				// Return 204 No Content instead of 404 error
+				slog.Debug("/api/v1/peer/sync: peer not found (already deleted)",
+					"peer_id", peerID, "event", eventType, "error", err)
+
+				// If this is a deletion event, trigger local deletion
+				if eventType == "deleted" {
+					slog.Info("/api/v1/peer/sync: triggering local deletion event for missing peer",
+						"peer_id", peerID)
+					e.bus.Publish(app.TopicPeerSyncedLocal, domain.PeerIdentifier(peerID))
+				}
+				respond.Status(w, http.StatusNoContent)
 				return
 			}
 
-			// NOTE: In event-driven architecture, peer sync is triggered via peer:updated:sync events
-			// API endpoint only syncs peers to local WireGuard, no need to publish events
-			// handlePeerUpdatedSyncEvent already handles syncing to WireGuard on all nodes
-			
-			slog.Info("/api/v1/peer/sync: peer-specific sync completed",
-				"peer_id", peerID, "interface", peer.InterfaceIdentifier)
+			// Publish to local sync event (NOT fanned out by fanout subscriber)
+			// This triggers local WireGuard manager to sync the peer without creating a feedback loop
+			//
+			// Key difference from TopicPeerCreatedSync:
+			// - TopicPeerCreatedSync: Published by creation handler, triggers fanout
+			// - TopicPeerSyncedLocal: Published by HTTP endpoint, does NOT trigger fanout
+			//
+			// Flow:
+			// 1. User creates peer on Node A
+			// 2. Peer saved to replicated database
+			// 3. peer:created:sync published on Node A
+			// 4. Node A's WireGuard manager handles (adds to WG)
+			// 5. Node A's fanout sends HTTP to nodes B-Z with X-WGP-NoEcho=1
+			// 6. Node B HTTP endpoint receives call, publishes TopicPeerSyncedLocal
+			// 7. Node B's WireGuard manager handles TopicPeerSyncedLocal (adds to WG)
+			// 8. fanout does NOT re-fanout(doesn't subscribe to TopicPeerSyncedLocal)
+			// 9. Result: No loop, all nodes have peer
+			slog.Debug("/api/v1/peer/sync: publishing local sync event (breaks fanout loop)",
+				"peer_id", peerID, "event", eventType, "interface", peer.InterfaceIdentifier)
 
-			respond.JSON(w, http.StatusOK, map[string]any{"synced": 1, "peer_id": peerID})
+			e.bus.Publish(app.TopicPeerSyncedLocal, peer.Identifier)
+
+			slog.Info("/api/v1/peer/sync: peer-specific sync completed",
+				"peer_id", peerID, "event", eventType, "interface", peer.InterfaceIdentifier,
+				"from_fanout", noEcho)
+
+			respond.JSON(w, http.StatusOK, map[string]any{"synced": 1, "peer_id": peerID, "event": eventType})
 			return
 		}
 

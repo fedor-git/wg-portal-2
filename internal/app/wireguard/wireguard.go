@@ -209,6 +209,9 @@ func (m Manager) connectToMessageBus() {
 	_ = m.bus.Subscribe(app.TopicPeerCreatedSync, m.handlePeerCreatedSyncEvent)
 	_ = m.bus.Subscribe(app.TopicPeerUpdatedSync, m.handlePeerUpdatedSyncEvent)
 	_ = m.bus.Subscribe(app.TopicPeerDeletedSync, m.handlePeerDeletedSyncEvent)
+
+	// Local peer sync events from HTTP endpoint (breaks fanout feedback loop)
+	_ = m.bus.Subscribe(app.TopicPeerSyncedLocal, m.handlePeerSyncedLocalEvent)
 }
 
 func (m Manager) handleUserCreationEvent(user domain.User) {
@@ -890,5 +893,78 @@ func (m Manager) handlePeerDeletedSyncEvent(peerID domain.PeerIdentifier) {
 		"breakdown_ms", map[string]interface{}{
 			"db_query":          dbDuration.Milliseconds(),
 			"delete_operations": totalDeleteDuration.Milliseconds(),
+		})
+}
+
+// handlePeerSyncedLocalEvent syncs a peer received from HTTP fanout to local WireGuard
+// Published by HTTP endpoint to break fanout feedback loop
+// Only called locally (fanout does NOT subscribe to this event)
+func (m Manager) handlePeerSyncedLocalEvent(peerID domain.PeerIdentifier) {
+	ctx := context.Background()
+	startProcessTime := time.Now()
+	slog.Info("[PEER_SYNC_LOCAL] handling synced peer - START",
+		"peer_id", peerID,
+		"processing_start_unix_ns", startProcessTime.UnixNano())
+
+	// Get peer from database
+	dbStartTime := time.Now()
+	peer, err := m.db.GetPeer(ctx, peerID)
+	dbDuration := time.Since(dbStartTime)
+	if err != nil {
+		// Peer not found could mean:
+		// 1. Deletion event (peer was synced as deleted)
+		// 2. Database replication lag
+		// Either way, try to delete from WireGuard
+		slog.Warn("[PEER_SYNC_LOCAL] peer not found in database (may be deleted)", "peer_id", peerID, "db_query_ms", dbDuration.Milliseconds())
+
+		// Get interfaces and delete peer from all of them
+		interfaces, err := m.db.GetAllInterfaces(ctx)
+		if err == nil {
+			localController := m.wg.GetControllerByName(config.LocalBackendName)
+			if localController != nil {
+				for _, iface := range interfaces {
+					_ = localController.DeletePeer(ctx, iface.Identifier, peerID)
+				}
+			}
+		}
+		slog.Info("[PEER_SYNC_LOCAL] completed deletion cleanup - COMPLETED", "peer_id", peerID)
+		return
+	}
+	slog.Info("[PEER_SYNC_LOCAL] GetPeer completed",
+		"peer_id", peerID,
+		"interface", peer.InterfaceIdentifier,
+		"db_query_ms", dbDuration.Milliseconds())
+
+	// Get the WireGuard controller for the interface
+	localController := m.wg.GetControllerByName(config.LocalBackendName)
+	if localController == nil {
+		slog.Warn("[PEER_SYNC_LOCAL] local WireGuard controller not available")
+		return
+	}
+
+	// Add peer to WireGuard using SavePeer
+	savePeerStartTime := time.Now()
+	if err := localController.SavePeer(ctx, peer.InterfaceIdentifier, peer.Identifier, func(pp *domain.PhysicalPeer) (*domain.PhysicalPeer, error) {
+		domain.MergeToPhysicalPeer(pp, peer, m.cfg.Core.ForceClientIPAsAllowedIP)
+		return pp, nil
+	}); err != nil {
+		slog.Error("[PEER_SYNC_LOCAL] failed to add peer to WireGuard", "peer_id", peerID, "error", err)
+		return
+	}
+	savePeerDuration := time.Since(savePeerStartTime)
+	slog.Info("[PEER_SYNC_LOCAL] SavePeer completed",
+		"peer_id", peerID,
+		"interface", peer.InterfaceIdentifier,
+		"save_peer_ms", savePeerDuration.Milliseconds())
+
+	totalDuration := time.Since(startProcessTime)
+	slog.Info("[PEER_SYNC_LOCAL] successfully synced peer to WireGuard - COMPLETED",
+		"peer_id", peerID,
+		"interface", peer.InterfaceIdentifier,
+		"total_processing_ms", totalDuration.Milliseconds(),
+		"total_processing_us", totalDuration.Microseconds(),
+		"breakdown_ms", map[string]interface{}{
+			"db_query":  dbDuration.Milliseconds(),
+			"save_peer": savePeerDuration.Milliseconds(),
 		})
 }
