@@ -53,6 +53,11 @@ type Config struct {
 		// Auto-set from POD_NAME, HOSTNAME env vars, or hostname syscall
 		ClusterNodeId string `yaml:"cluster_node_id" env:"CLUSTER_NODE_ID,POD_NAME,HOSTNAME"`
 
+		// Master indicates if this node is responsible for cleanup operations (e.g., deleting expired peers)
+		// Only one node in the cluster should have this set to true
+		// If all nodes are false, cleanup operations are disabled for safety
+		Master bool `yaml:"master" env:"IS_MASTER"`
+
 		// ForceClientIPAsAllowedIP: When true, always use client's IP addresses as AllowedIPs on server side,
 		// ignoring any AllowedIPsStr from API/UI. This prevents overlapping AllowedIPs (like 0.0.0.0/0).
 		// Recommended: true for multi-client setups.
@@ -201,10 +206,14 @@ func defaultConfig() *Config {
 	cfg.Advanced.ApiAdminOnly = true
 	cfg.Advanced.LimitAdditionalUserPeers = 0
 
-	cfg.Statistics.UsePingChecks = true
+	// PERFORMANCE: Ping checks disabled by default to prevent CPU overload
+	// With 600+ peers × 2s timeout × 3 workers = 7min per cycle
+	// But ticker at 1min = exponential queue backlog and CPU spike (72%)
+	// Enable only if ping metrics are essential, or increase interval to 5-10min
+	cfg.Statistics.UsePingChecks = false
 	cfg.Statistics.PingCheckWorkers = 3
 	cfg.Statistics.PingUnprivileged = false
-	cfg.Statistics.PingCheckInterval = 1 * time.Minute
+	cfg.Statistics.PingCheckInterval = 5 * time.Minute
 	cfg.Statistics.DataCollectionInterval = 1 * time.Minute
 	cfg.Statistics.CollectInterfaceData = true
 	cfg.Statistics.CollectPeerData = true

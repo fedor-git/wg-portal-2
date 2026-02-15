@@ -51,15 +51,15 @@ func (e PeerEndpoint) GetName() string {
 }
 
 func (e *PeerEndpoint) SetEventBus(bus app.EventBus) {
-    e.bus = bus
+	e.bus = bus
 }
 
 func (e *PeerEndpoint) publish(topic string, args ...any) {
-    if e.bus == nil || topic == "" {
-        return
-    }
+	if e.bus == nil || topic == "" {
+		return
+	}
 	slog.Debug("[V1] publish", "topic", topic)
-    e.bus.Publish(topic, args...)
+	e.bus.Publish(topic, args...)
 }
 
 func (e PeerEndpoint) RegisterRoutes(g *routegroup.Bundle) {
@@ -238,12 +238,12 @@ func (e PeerEndpoint) handleCreatePost() http.HandlerFunc {
 			respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
 			return
 		}
-		
+
 		// Log the received ExpiresAt value for debugging
 		if peer.ExpiresAt != "" {
 			slog.Debug("Creating peer with ExpiresAt value", "raw_value", peer.ExpiresAt)
 		}
-		
+
 		if err := e.validator.Struct(peer); err != nil {
 			respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
 			return
@@ -256,8 +256,8 @@ func (e PeerEndpoint) handleCreatePost() http.HandlerFunc {
 			return
 		}
 
-		e.publish(app.TopicPeerCreated)
-		e.publish(app.TopicPeerUpdated)
+		// NOTE: TopicPeerCreatedSync is already published by service layer (wireguard_peers.go:304)
+		// DO NOT publish it again here to avoid duplicate events and sync cascades
 		e.publish("peer.save", newPeer)
 		e.publish("peers.updated", "v1:create")
 
@@ -296,12 +296,12 @@ func (e PeerEndpoint) handleUpdatePut() http.HandlerFunc {
 			respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
 			return
 		}
-		
+
 		// Log the received ExpiresAt value for debugging
 		if peer.ExpiresAt != "" {
 			slog.Debug("Received ExpiresAt value", "raw_value", peer.ExpiresAt, "peer_id", id)
 		}
-		
+
 		if err := e.validator.Struct(peer); err != nil {
 			respond.JSON(w, http.StatusBadRequest, models.Error{Code: http.StatusBadRequest, Message: err.Error()})
 			return
@@ -314,7 +314,8 @@ func (e PeerEndpoint) handleUpdatePut() http.HandlerFunc {
 			return
 		}
 
-		e.publish(app.TopicPeerUpdated)
+		// NOTE: TopicPeerUpdatedSync is already published by service layer (wireguard_peers.go:422)
+		// DO NOT publish it again here to avoid duplicate events and sync cascades
 		e.publish("peer.save", updatedPeer)
 		e.publish("peers.updated", "v1:update")
 
@@ -353,58 +354,93 @@ func (e PeerEndpoint) handleDelete() http.HandlerFunc {
 			return
 		}
 
-		e.publish("peer:deleted", domain.PeerIdentifier(id))
+		// NOTE: TopicPeerDeletedSync is already published by service layer (wireguard_peers.go:464)
+		// DO NOT publish it again here to avoid duplicate events and sync cascades
+		e.publish("peer.delete", domain.PeerIdentifier(id))
+		e.publish("peers.updated", "v1:delete")
 
 		respond.Status(w, http.StatusNoContent)
 	}
 }
 
-
 func (e PeerEndpoint) handleSyncPost() http.HandlerFunc {
-    return func(w http.ResponseWriter, r *http.Request) {
-        slog.Info("/api/v1/peer/sync: received sync request")
-        ctx := r.Context()
-        if r.Header.Get("X-WGP-NoEcho") == "1" {
-            ctx = app.WithNoFanout(ctx)
-            slog.Debug("/api/v1/peer/sync: NoEcho header detected, disabling fanout")
-        }
-        
-        // Get node ID from header (identifies which node is sending the sync request)
-        nodeID := r.Header.Get("X-WGP-Origin")
-        if nodeID == "" {
-            // Fallback: try to use hostname as node identifier
-            hostname, _ := os.Hostname()
-            nodeID = hostname
-            if nodeID == "" {
-                nodeID = "unknown-node"
-            }
-        }
-        
-        // Use distributed lock to ensure only one node syncs at a time
-        // This prevents database contention and 504 Gateway Timeout cascades
-        count, err := e.peers.SyncAllPeersFromDBWithLock(ctx, nodeID)
-        if err != nil { 
-            slog.Error("/api/v1/peer/sync: SyncAllPeersFromDBWithLock failed", "error", err, "node_id", nodeID)
-            respond.JSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-            return
-        }
-        
-        slog.Info("/api/v1/peer/sync: sync completed", "synced", count, "node_id", nodeID)
-        
-        // Force interface update events after sync, even with NoFanout
-        // This ensures config files and routes are updated after peer sync
-        // Always publish events, even if no peers were synced (e.g., when last peer is deleted)
-        interfaces, err := e.peers.GetAllInterfaces(ctx)
-        if err != nil {
-            slog.Warn("failed to get interfaces for update events", "error", err)
-            // Fallback to hardcoded interface if we can't get interfaces
-            e.publish(app.TopicPeerInterfaceUpdated, domain.InterfaceIdentifier("wg0"))
-        } else {
-            for _, iface := range interfaces {
-                e.publish(app.TopicPeerInterfaceUpdated, domain.InterfaceIdentifier(iface.Identifier))
-            }
-        }
-        
-        respond.JSON(w, http.StatusOK, map[string]any{"synced": count})
-    }
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		if r.Header.Get("X-WGP-NoEcho") == "1" {
+			ctx = app.WithNoFanout(ctx)
+			slog.Debug("/api/v1/peer/sync: NoEcho header detected, disabling fanout")
+		}
+
+		// Get node ID from header (identifies which node is sending the sync request)
+		nodeID := r.Header.Get("X-WGP-Origin")
+		if nodeID == "" {
+			// Fallback: try to use hostname as node identifier
+			hostname, _ := os.Hostname()
+			nodeID = hostname
+			if nodeID == "" {
+				nodeID = "unknown-node"
+			}
+		}
+
+		// Check if this is a peer-specific sync (from fanout peer event)
+		// or full sync (from periodic interface event or startup)
+		peerID := r.URL.Query().Get("peer_id")
+
+		if peerID != "" {
+			// Peer-specific sync: sync only this one peer to local WireGuard
+			slog.Info("/api/v1/peer/sync: peer-specific sync",
+				"peer_id", peerID, "node_id", nodeID)
+
+			// Get the specific peer from database
+			peer, err := e.peers.GetById(ctx, domain.PeerIdentifier(peerID))
+			if err != nil {
+				slog.Warn("/api/v1/peer/sync: failed to get peer",
+					"peer_id", peerID, "error", err)
+				respond.JSON(w, http.StatusNotFound, map[string]any{
+					"error":   "peer not found",
+					"peer_id": peerID,
+				})
+				return
+			}
+
+			// NOTE: In event-driven architecture, peer sync is triggered via peer:updated:sync events
+			// API endpoint only syncs peers to local WireGuard, no need to publish events
+			// handlePeerUpdatedSyncEvent already handles syncing to WireGuard on all nodes
+			
+			slog.Info("/api/v1/peer/sync: peer-specific sync completed",
+				"peer_id", peerID, "interface", peer.InterfaceIdentifier)
+
+			respond.JSON(w, http.StatusOK, map[string]any{"synced": 1, "peer_id": peerID})
+			return
+		}
+
+		// Full sync: use distributed lock to ensure only one node syncs at a time
+		// This prevents database contention and 504 Gateway Timeout cascades
+		count, err := e.peers.SyncAllPeersFromDBWithLock(ctx, nodeID)
+		if err != nil {
+			slog.Error("/api/v1/peer/sync: SyncAllPeersFromDBWithLock failed", "error", err, "node_id", nodeID)
+			respond.JSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+
+		slog.Info("/api/v1/peer/sync: full sync completed", "synced", count, "node_id", nodeID)
+
+		// Publish interface update events ONLY if fanout is enabled
+		// If X-WGP-NoEcho header is set, NoFanout is true, so skip events to prevent feedback loop
+		// (the remote fanout node is just syncing the database, not requesting config updates)
+		if !app.NoFanout(ctx) {
+			interfaces, err := e.peers.GetAllInterfaces(ctx)
+			if err != nil {
+				slog.Warn("failed to get interfaces for update events", "error", err)
+				// Fallback to hardcoded interface if we can't get interfaces
+				e.publish(app.TopicPeerInterfaceUpdated, domain.InterfaceIdentifier("wg0"))
+			} else {
+				for _, iface := range interfaces {
+					e.publish(app.TopicPeerInterfaceUpdated, domain.InterfaceIdentifier(iface.Identifier))
+				}
+			}
+		}
+
+		respond.JSON(w, http.StatusOK, map[string]any{"synced": count})
+	}
 }

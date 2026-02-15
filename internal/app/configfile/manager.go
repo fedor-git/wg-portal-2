@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/yeqown/go-qrcode/v2"
 	"github.com/yeqown/go-qrcode/writer/compressed"
@@ -85,10 +84,9 @@ func NewConfigFileManager(
 		cfg:        cfg,
 		bus:        bus,
 		tplHandler: tplHandler,
-
-		fsRepo: fsRepo,
-		users:  users,
-		wg:     wg,
+		fsRepo:     fsRepo,
+		users:      users,
+		wg:         wg,
 	}
 
 	if m.cfg.Advanced.ConfigStoragePath != "" {
@@ -116,7 +114,10 @@ func (m Manager) connectToMessageBus() {
 	_ = m.bus.Subscribe(app.TopicInterfaceCreated, m.handleInterfaceSavedEvent)
 	_ = m.bus.Subscribe(app.TopicInterfaceUpdated, m.handleInterfaceSavedEvent)
 	_ = m.bus.Subscribe(app.TopicInterfaceDeleted, m.handleInterfaceDeleteEvent)
-	_ = m.bus.Subscribe(app.TopicPeerInterfaceUpdated, m.handlePeerInterfaceUpdatedEvent)
+	// NOTE: We do NOT subscribe to TopicPeerInterfaceUpdated anymore
+	// Reason: WireGuard reads peers from kernel-space, not from config file
+	// Config file is only needed for recovery after reboot
+	// Writing config on every peer update (300+ times on startup) wastes disk I/O
 }
 
 func (m Manager) handleInterfaceSavedEvent(iface domain.Interface) {
@@ -144,32 +145,6 @@ func (m Manager) handleInterfaceDeleteEvent(iface domain.Interface) {
 	if err != nil {
 		slog.Error("failed to remove persisted interface config",
 			"interface", iface.Identifier, "error", err)
-	}
-}
-
-func (m Manager) handlePeerInterfaceUpdatedEvent(id domain.InterfaceIdentifier) {
-	peerInterface, err := m.wg.GetInterface(context.Background(), id)
-	if err != nil {
-		slog.Error("failed to load interface",
-			"interface", id,
-			"error", err)
-		return
-	}
-
-	if !peerInterface.SaveConfig {
-		return
-	}
-
-	slog.Debug("handling peer interface updated event", "interface", id)
-
-	// Add a small delay to ensure WireGuard interface sync completes first
-	time.Sleep(100 * time.Millisecond)
-
-	err = m.PersistInterfaceConfig(context.Background(), peerInterface.Identifier)
-	if err != nil {
-		slog.Error("failed to automatically persist interface config",
-			"interface", peerInterface.Identifier,
-			"error", err)
 	}
 }
 
@@ -262,7 +237,7 @@ func (m Manager) PersistInterfaceConfig(ctx context.Context, id domain.Interface
 	}
 
 	slog.Debug("persisting interface config", "interface", id, "peerCount", len(peers), "filename", iface.GetConfigFileName())
-	
+
 	// Log peer details for debugging
 	for _, peer := range peers {
 		slog.Debug("config will include peer", "interface", id, "peer", peer.Identifier, "disabled", peer.IsDisabled())
@@ -298,5 +273,5 @@ type nopCloser struct {
 func (nopCloser) Close() error { return nil }
 
 func (m *Manager) StartBackgroundJobs(ctx context.Context) {
-    m.connectToMessageBus()
+	m.connectToMessageBus()
 }

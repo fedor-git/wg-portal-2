@@ -41,6 +41,7 @@ func (m Manager) SyncAllPeersFromDB(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("list interfaces: %w", err)
 	}
 
+	totalLoaded := 0
 	applied := 0
 	for _, in := range ifaces {
 		peers, err := m.db.GetInterfacePeers(ctx, in.Identifier)
@@ -67,12 +68,16 @@ func (m Manager) SyncAllPeersFromDB(ctx context.Context) (int, error) {
 			}
 		}
 
+		// Count all active peers loaded from DB
+		totalLoaded += len(newPeerMap)
+
 		// Remove peers that are no longer in the database
 		for id := range existingPeerMap {
 			if _, exists := newPeerMap[id]; !exists {
 				if err := m.wg.RemovePeer(ctx, string(in.Identifier), id); err != nil {
 					slog.ErrorContext(ctx, "failed to remove peer", "peer", id, "iface", in.Identifier, "err", err)
 				}
+				applied++
 			}
 		}
 
@@ -88,7 +93,8 @@ func (m Manager) SyncAllPeersFromDB(ctx context.Context) (int, error) {
 		}
 	}
 
-	return applied, nil
+	slog.Info("[WIREGUARD] startup sync stats", "total_loaded", totalLoaded, "changes_applied", applied)
+	return totalLoaded, nil
 }
 
 func (m Manager) replacePeers(ctx context.Context, iface domain.InterfaceIdentifier, peers []domain.Peer) error {

@@ -166,7 +166,7 @@ func applyConnectionPoolConfig(db *gorm.DB, cfg config.DatabaseConfig) error {
 	if maxIdle < 10 {
 		maxIdle = 10 // Ensure minimum idle connections for cluster
 	}
-	
+
 	sqlDB.SetMaxOpenConns(maxOpen)
 	sqlDB.SetMaxIdleConns(maxIdle)
 	sqlDB.SetConnMaxLifetime(maxLifetime)
@@ -209,7 +209,7 @@ func NewDatabase(cfg config.DatabaseConfig) (*gorm.DB, error) {
 			// Full randomness jitter to spread retries across time
 			jitterAmount := time.Duration(rand.Intn(int(baseWaitTime))) // ±100% jitter
 			waitTime := baseWaitTime + jitterAmount
-			
+
 			slog.Warn("database connection attempt failed, retrying with exponential backoff",
 				"attempt", attempt+1,
 				"max_retries", maxRetries,
@@ -319,13 +319,15 @@ func NewDatabase(cfg config.DatabaseConfig) (*gorm.DB, error) {
 // SqlRepo is a SQL database repository implementation.
 // Currently, it supports MySQL, SQLite, Microsoft SQL and Postgresql database systems.
 type SqlRepo struct {
-	db *gorm.DB
+	db  *gorm.DB
+	cfg *config.Config
 }
 
 // NewSqlRepository creates a new SqlRepo instance.
-func NewSqlRepository(db *gorm.DB) (*SqlRepo, error) {
+func NewSqlRepository(db *gorm.DB, cfg *config.Config) (*SqlRepo, error) {
 	repo := &SqlRepo{
-		db: db,
+		db:  db,
+		cfg: cfg,
 	}
 
 	if err := repo.preCheck(); err != nil {
@@ -1494,6 +1496,14 @@ func (r *SqlRepo) SyncAllPeersFromDBWithLock(ctx context.Context, nodeID string)
 		if relErr := r.ReleaseSyncLock(context.Background(), nodeID); relErr != nil {
 			slog.Error("failed to release sync lock", "error", relErr)
 		}
+		// Clean up expired locks in background to prevent table bloat
+		go func() {
+			goCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if cleanErr := r.CleanupExpiredLocks(goCtx); cleanErr != nil {
+				slog.Debug("cleanup expired locks failed", "error", cleanErr)
+			}
+		}()
 	}()
 
 	// Now perform the actual sync with the lock held
@@ -1527,16 +1537,16 @@ const (
 func (r *SqlRepo) GetExpiredPeers(ctx context.Context) ([]domain.Peer, error) {
 	var peers []domain.Peer
 	now := time.Now()
-	
+
 	err := r.db.WithContext(ctx).
 		Where("expires_at IS NOT NULL AND expires_at < ?", now).
 		Select("identifier, interface_identifier").
 		Find(&peers).Error
-	
+
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return peers, nil
 }
 
@@ -1546,67 +1556,55 @@ func (r *SqlRepo) DeletePeersByIDs(ctx context.Context, peerIDs []string) (int64
 	if len(peerIDs) == 0 {
 		return 0, nil
 	}
-	
+
 	result := r.db.WithContext(ctx).
 		Where("identifier IN ?", peerIDs).
 		Delete(&domain.Peer{})
-	
+
 	if result.Error != nil {
 		return 0, result.Error
 	}
-	
+
 	return result.RowsAffected, nil
 }
 
-// FindAndDeleteExpiredPeersWithLock ensures only one node cleanup all expired peers
-// Other nodes wait for lock or receive event about which IDs were deleted
+// FindAndDeleteExpiredPeersWithLock ensures only MASTER node deletes expired peers
+// Other nodes skip cleanup to avoid conflicts across multiple nodes
+// If this node is not configured as master, cleanup is skipped
 func (r *SqlRepo) FindAndDeleteExpiredPeersWithLock(ctx context.Context, nodeID string) (expiredPeerIDs []string, err error) {
-	// Attempt to acquire lock for cleanup
-	lockCtx, cancel := context.WithTimeout(ctx, expireCleanupTimeout)
-	defer cancel()
-	
-	heldBy, lockErr := r.AcquireLock(lockCtx, expireCleanupLockKey, nodeID, expireCleanupLockDuration)
-	if lockErr != nil {
-		// Another node is performing cleanup, we wait or skip
-		slog.Debug("[EXPIRE_CLEANUP] lock held by another node, skipping cleanup",
-			"held_by", heldBy, "self", nodeID)
+	// Only MASTER node can delete expired peers
+	if !r.cfg.Core.Master {
+		slog.Debug("[EXPIRE_CLEANUP] this node is not master, skipping cleanup", "node_id", nodeID)
 		return nil, nil
 	}
-	
-	// We have lock, performing cleanup
-	defer func() {
-		if relErr := r.ReleaseLock(context.Background(), expireCleanupLockKey, nodeID); relErr != nil {
-			slog.Error("[EXPIRE_CLEANUP] failed to release cleanup lock", "error", relErr)
-		}
-	}()
-	
+
 	// Find expired peers
 	expiredPeers, err := r.GetExpiredPeers(ctx)
 	if err != nil {
 		slog.Error("[EXPIRE_CLEANUP] failed to get expired peers", "error", err)
 		return nil, err
 	}
-	
+
 	if len(expiredPeers) == 0 {
 		slog.Debug("[EXPIRE_CLEANUP] no expired peers found")
 		return nil, nil
 	}
-	
+
 	// Delete them from DB
 	peerIDs := make([]string, len(expiredPeers))
 	for i, p := range expiredPeers {
 		peerIDs[i] = string(p.Identifier)
 	}
-	
+
 	deletedCount, err := r.DeletePeersByIDs(ctx, peerIDs)
 	if err != nil {
 		slog.Error("[EXPIRE_CLEANUP] failed to delete expired peers", "error", err, "count", len(peerIDs))
 		return nil, err
 	}
-	
+
 	slog.Info("[EXPIRE_CLEANUP] deleted expired peers",
 		"node_id", nodeID, "count", deletedCount, "peer_ids_count", len(peerIDs))
-	
+
 	return peerIDs, nil
 }
 
@@ -1614,71 +1612,89 @@ func (r *SqlRepo) FindAndDeleteExpiredPeersWithLock(ctx context.Context, nodeID 
 
 // region generic distributed locking (for reuse)
 
-// AcquireLock is a generic lock mechanism for various operations
+// AcquireLock is a generic lock mechanism for various operations.
+// IMPORTANT: Uses simple INSERT without ON DUPLICATE KEY UPDATE to avoid deadlocks.
+// If lock already exists and is not expired, returns who holds it (no retry loop).
 func (r *SqlRepo) AcquireLock(ctx context.Context, lockKey string, nodeID string, duration time.Duration) (acquiredBy string, err error) {
-	const maxRetries = 12
-	backoff := 50 * time.Millisecond
-
-	// Clean up expired locks
 	now := time.Now()
+
+	// Clean up expired locks (but don't retry on failure)
 	if delErr := r.db.WithContext(ctx).
 		Where("lock_key = ? AND expires_at < ?", lockKey, now).
 		Delete(&NodeSyncLock{}).Error; delErr != nil {
 		slog.Debug("failed to clean expired locks", "lock_key", lockKey, "error", delErr)
 	}
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		result := r.db.WithContext(ctx).
-			Clauses(clause.OnConflict{
-				UpdateAll: false,
-			}).
-			Create(&NodeSyncLock{
-				LockKey:   lockKey,
-				NodeID:    nodeID,
-				LockedAt:  now,
-				ExpiresAt: now.Add(duration),
-			})
+	// Try simple INSERT (no ON DUPLICATE KEY UPDATE to avoid deadlock)
+	result := r.db.WithContext(ctx).
+		Create(&NodeSyncLock{
+			LockKey:   lockKey,
+			NodeID:    nodeID,
+			LockedAt:  now,
+			ExpiresAt: now.Add(duration),
+		})
 
-		if result.Error == nil {
-			slog.Debug("[LOCK] acquired", "lock_key", lockKey, "node_id", nodeID)
-			return "", nil
-		}
-
-		// Check who holds the lock
-		var lock NodeSyncLock
-		if err := r.db.WithContext(ctx).
-			Where("lock_key = ?", lockKey).
-			First(&lock).Error; err == nil {
-			if lock.ExpiresAt.Before(now) {
-				r.db.WithContext(ctx).Delete(&lock)
-				continue
-			}
-			acquiredBy = lock.NodeID
-		}
-
-		if attempt < maxRetries-1 {
-			select {
-			case <-time.After(backoff):
-				if backoff < 3*time.Second {
-					backoff *= 2
-				}
-			case <-ctx.Done():
-				return acquiredBy, ctx.Err()
-			}
-		}
+	if result.Error == nil {
+		slog.Debug("[LOCK] acquired", "lock_key", lockKey, "node_id", nodeID)
+		return "", nil
 	}
 
-	return acquiredBy, fmt.Errorf("failed to acquire lock %s", lockKey)
+	// INSERT failed - check who holds the lock (no retry, just check)
+	var lock NodeSyncLock
+	if err := r.db.WithContext(ctx).
+		Where("lock_key = ?", lockKey).
+		First(&lock).Error; err == nil {
+		if lock.ExpiresAt.Before(now) {
+			// Lock expired, clean it up (best effort)
+			r.db.WithContext(ctx).Delete(&lock)
+			return "", fmt.Errorf("lock expired, please retry")
+		}
+		// Lock is held by another node
+		acquiredBy = lock.NodeID
+		return acquiredBy, fmt.Errorf("lock held by %s", acquiredBy)
+	}
+
+	// Couldn't determine lock holder
+	return "", fmt.Errorf("failed to acquire lock %s", lockKey)
 }
 
 // ReleaseLock releases a distributed lock
 func (r *SqlRepo) ReleaseLock(ctx context.Context, lockKey string, nodeID string) error {
+	// Only delete lock if it belongs to us AND it hasn't expired yet
+	// This prevents deadlocks from competing DELETE operations on expired locks
 	result := r.db.WithContext(ctx).
-		Where("lock_key = ? AND node_id = ?", lockKey, nodeID).
+		Where("lock_key = ? AND node_id = ? AND expires_at > NOW()", lockKey, nodeID).
 		Delete(&NodeSyncLock{})
 
 	if result.Error != nil {
+		// Log but don't fail - lock might already be released or expired
+		slog.Debug("failed to release lock", "lockKey", lockKey, "nodeID", nodeID, "error", result.Error)
+		return nil
+	}
+
+	if result.RowsAffected == 0 {
+		// Lock was already released or expired - not an error
+		slog.Debug("lock already released or expired", "lockKey", lockKey, "nodeID", nodeID)
+		return nil
+	}
+
+	return nil
+}
+
+// CleanupExpiredLocks removes all expired locks from the database
+// This prevents deadlocks from piling up expired lock rows
+func (r *SqlRepo) CleanupExpiredLocks(ctx context.Context) error {
+	result := r.db.WithContext(ctx).
+		Where("expires_at < ?", time.Now()).
+		Delete(&NodeSyncLock{})
+
+	if result.Error != nil {
+		slog.Warn("failed to cleanup expired locks", "error", result.Error)
 		return result.Error
+	}
+
+	if result.RowsAffected > 0 {
+		slog.Debug("cleaned up expired locks", "rows_deleted", result.RowsAffected)
 	}
 
 	return nil

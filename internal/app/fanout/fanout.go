@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -78,7 +79,9 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 		s.Timeout = 60 * time.Second
 	}
 	if s.Debounce <= 0 {
-		s.Debounce = 250 * time.Millisecond
+		// 1 second debounce for interface topology events only
+		// Peer sync events bypass debounce entirely and are sent immediately
+		s.Debounce = 1 * time.Second
 	}
 
 	if s.Origin == "" {
@@ -96,11 +99,76 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 	}
 
 	if len(s.Topics) == 0 {
-		// Peer events are handled by event-driven sync handlers (see wireguard.go)
-		// Fanout only needs interface events for operations that affect all peers (e.g., config changes)
+		// CRITICAL: Only peer-related events trigger cross-node sync
+		// Interface events (config persistence, topology) should NOT trigger fanout
+		// Reason: In event-driven architecture with shared database, peers are the source of truth
+		// Interface settings are local configuration and don't need cluster-wide sync
+		// Peer changes are published immediately via peer:*:sync topics
 		s.Topics = []string{
-			"interface:created", "interface:updated", "interface:deleted",
+			"peer:created:sync", "peer:updated:sync", "peer:deleted:sync",
 		}
+	} else {
+		// Migrate old topic names to new event-driven sync names
+		// Old: peer:created → New: peer:created:sync (for immediate sync)
+		// This allows users to keep existing YAML configs while using new architecture
+		newTopics := []string{}
+		seenTopics := make(map[string]bool) // Deduplicate topics
+		syncsToAdd := map[string]bool{
+			"peer:created:sync": true,
+			"peer:updated:sync": true,
+			"peer:deleted:sync": true,
+		}
+
+		for _, topic := range s.Topics {
+			switch topic {
+			case "peer:created":
+				if !seenTopics["peer:created:sync"] {
+					newTopics = append(newTopics, "peer:created:sync")
+					seenTopics["peer:created:sync"] = true
+				}
+				syncsToAdd["peer:created:sync"] = false
+				slog.Info("[FANOUT] migrating topic from peer:created to peer:created:sync")
+			case "peer:updated":
+				if !seenTopics["peer:updated:sync"] {
+					newTopics = append(newTopics, "peer:updated:sync")
+					seenTopics["peer:updated:sync"] = true
+				}
+				syncsToAdd["peer:updated:sync"] = false
+				slog.Info("[FANOUT] migrating topic from peer:updated to peer:updated:sync")
+			case "peer:deleted":
+				if !seenTopics["peer:deleted:sync"] {
+					newTopics = append(newTopics, "peer:deleted:sync")
+					seenTopics["peer:deleted:sync"] = true
+				}
+				syncsToAdd["peer:deleted:sync"] = false
+				slog.Info("[FANOUT] migrating topic from peer:deleted to peer:deleted:sync")
+			case "interface:created", "interface:updated", "interface:deleted":
+				// Skip interface events: they should NOT trigger fanout syncs
+				// Interface config changes don't affect peer state across cluster
+				slog.Warn("[FANOUT] ignoring interface topic (not needed for event-driven sync)", "topic", topic)
+			default:
+				// Keep any other topics as-is, but deduplicate
+				if !seenTopics[topic] {
+					newTopics = append(newTopics, topic)
+					seenTopics[topic] = true
+				}
+			}
+		}
+
+		// Ensure peer:*:sync topics are always subscribed to (even if not in config)
+		for syncTopic, shouldAdd := range syncsToAdd {
+			if shouldAdd && !seenTopics[syncTopic] {
+				newTopics = append(newTopics, syncTopic)
+				seenTopics[syncTopic] = true
+				slog.Info("[FANOUT] auto-adding missing peer sync topic", "topic", syncTopic)
+			}
+		}
+
+		// NOTE: We do NOT auto-add interface events anymore
+		// Reason: Interface changes (save config, topology updates) should not trigger cluster-wide syncs
+		// Only peer changes matter for cluster sync; interface config is local state stored in database
+
+		s.Topics = newTopics
 	}
 
 	f := &fanout{
@@ -108,20 +176,36 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 		client:        createHTTPClient(s),
 		debounce:      newDebouncer(s.Debounce),
 		metricsServer: metricsServer,
+		wgm:           wireGuardManager,
 	}
 	if bus != nil {
 		for _, topic := range s.Topics {
-			t := topic
-			if err := bus.Subscribe(t, func(arg any) {
-				slog.Debug("[FANOUT] bump", "reason", "bus:"+t, "arg", arg)
-				f.bump("bus:" + t)
-				// Removed: SyncAllPeersFromDB() - now using event-driven sync instead
-				// Each node listens to peer:created, peer:updated, peer:deleted events directly
-			}); err != nil {
-				slog.Warn("[FANOUT] subscribe failed", "topic", t, "err", err)
-			} else {
-				slog.Debug("[FANOUT] subscribed", "topic", t)
-			}
+			// Create closure with proper variable capture
+			func(t string) {
+				if err := bus.Subscribe(t, func(arg any) {
+					// Peer sync events bypass debounce - transmitted immediately
+					isPeerEvent := t == "peer:created:sync" || t == "peer:updated:sync" || t == "peer:deleted:sync"
+
+					if isPeerEvent {
+						// Immediate fire for peer events (no debounce delay)
+						slog.Debug("[FANOUT] immediate fire for peer event", "topic", t, "arg", arg)
+						go f.fireForPeerEvent(context.Background(), t, arg)
+					} else {
+						// Debounced fire for interface events
+						// BUT: Block fanout bumps during startup to prevent cascade when peers not yet loaded
+						if wireGuardManager.IsStartupComplete() {
+							slog.Debug("[FANOUT] bump", "reason", "bus:"+t, "arg", arg)
+							f.bump("bus:" + t)
+						} else {
+							slog.Debug("[FANOUT] skip bump during startup", "reason", "bus:"+t)
+						}
+					}
+				}); err != nil {
+					slog.Warn("[FANOUT] subscribe failed", "topic", t, "err", err)
+				} else {
+					slog.Debug("[FANOUT] subscribed", "topic", t)
+				}
+			}(topic)
 		}
 	} else {
 		slog.Debug("[FANOUT] no bus provided, event-driven bumps disabled")
@@ -129,9 +213,11 @@ func Start(ctx context.Context, bus EventBus, fc cfgpkg.FanoutConfig, wireGuardM
 
 	go f.loop(ctx)
 
-	if s.KickOnStart {
-		f.bump("startup")
-	}
+	// REMOVED: KickOnStart full sync is NOT needed in event-driven architecture
+	// Reason: Each node loads peers from shared database independently on startup
+	// Full syncs waste bandwidth, trigger cascades, and 502 errors
+	// Peer changes are handled efficiently via peer:*:sync events
+	slog.Info("[FANOUT] starting in event-driven mode (no KickOnStart full sync)")
 
 	authConfigured := s.AuthHeader != "" && s.AuthValue != ""
 	slog.Info("[FANOUT] initialized",
@@ -194,6 +280,7 @@ type fanout struct {
 	client        *http.Client
 	debounce      *debouncer
 	metricsServer MetricsServerHealthUpdater
+	wgm           *wireguard.Manager
 }
 
 func (f *fanout) loop(ctx context.Context) {
@@ -210,6 +297,92 @@ func (f *fanout) loop(ctx context.Context) {
 func (f *fanout) bump(reason string) {
 	slog.Debug("[FANOUT] bump", "reason", reason)
 	f.debounce.Bump()
+}
+
+// fireForPeerEvent sends peer sync events to all nodes immediately (no debounce)
+// This ensures new/updated/deleted peers propagate instantly across cluster
+func (f *fanout) fireForPeerEvent(ctx context.Context, topic string, peerID any) {
+	// CRITICAL: Block peer sync during startup to prevent 502 cascade
+	// Each peer-specific sync request requires local WireGuard to have peers loaded
+	// If not started yet, skip to prevent database lookups on uninitialized state
+	if !f.wgm.IsStartupComplete() {
+		peerIDStr := fmt.Sprintf("%v", peerID)
+		slog.Info("[FANOUT_PEER] skip peer sync during startup",
+			"topic", topic, "peer_id", peerIDStr)
+		return
+	}
+
+	var wg sync.WaitGroup
+	var failedPeers []string
+	var failedMutex sync.Mutex
+
+	peerIDStr := fmt.Sprintf("%v", peerID)
+
+	slog.Info("[FANOUT_PEER] sending immediate peer sync event to all nodes",
+		"topic", topic, "peer_id", peerIDStr)
+
+	for _, base := range f.cfg.Peers {
+		base = strings.TrimSpace(base)
+		if base == "" {
+			continue
+		}
+		if isSelf(base, f.cfg.SelfURL) {
+			continue
+		}
+		endpoint := strings.TrimRight(base, "/") + "/api/v1/peer/sync?peer_id=" + url.QueryEscape(peerIDStr)
+
+		wg.Add(1)
+		go func(u string) {
+			defer wg.Done()
+
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
+			if err != nil {
+				slog.Warn("[FANOUT_PEER] build request failed", "url", u, "err", err)
+				failedMutex.Lock()
+				failedPeers = append(failedPeers, u)
+				failedMutex.Unlock()
+				return
+			}
+
+			if f.cfg.AuthHeader != "" && f.cfg.AuthValue != "" {
+				req.Header.Set(f.cfg.AuthHeader, f.cfg.AuthValue)
+			}
+
+			req.Header.Set(hdrOrigin, f.cfg.Origin)
+			req.Header.Set(hdrNoEcho, "1")
+			req.Header.Set(hdrCorrID, uuid.NewString())
+
+			resp, err := f.client.Do(req)
+			if err != nil {
+				slog.Warn("[FANOUT_PEER] sync failed", "url", u, "peer_id", peerIDStr, "err", err)
+				failedMutex.Lock()
+				failedPeers = append(failedPeers, u)
+				failedMutex.Unlock()
+				return
+			}
+			_ = resp.Body.Close()
+
+			if resp.StatusCode >= 300 {
+				slog.Warn("[FANOUT_PEER] sync non-2xx", "url", u, "peer_id", peerIDStr, "status", resp.Status)
+				failedMutex.Lock()
+				failedPeers = append(failedPeers, u+" ("+resp.Status+")")
+				failedMutex.Unlock()
+				return
+			}
+			slog.Debug("[FANOUT_PEER] sync ok", "url", u, "peer_id", peerIDStr)
+		}(endpoint)
+	}
+
+	wg.Wait()
+
+	if len(failedPeers) > 0 {
+		errMsg := fmt.Sprintf("Peer sync failed for peers: %s", strings.Join(failedPeers, ", "))
+		slog.Warn("[FANOUT_PEER] some peers failed", "failed_count", len(failedPeers), "message", errMsg)
+		f.metricsServer.SetSyncStatus(false, errMsg)
+	} else {
+		slog.Info("[FANOUT_PEER] all peers synced successfully", "peer_id", peerIDStr)
+		f.metricsServer.SetSyncStatus(true, "")
+	}
 }
 
 func (f *fanout) fire(ctx context.Context) {
