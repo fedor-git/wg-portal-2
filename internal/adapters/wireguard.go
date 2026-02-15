@@ -368,6 +368,7 @@ func (r *WgRepo) deleteLowLevelInterface(id domain.InterfaceIdentifier) error {
 
 // SavePeer updates the peer with the given id.
 // If no existing peer is found, a new peer is created.
+// Optimized: Both create and update happen in single syscall
 func (r *WgRepo) SavePeer(
 	_ context.Context,
 	deviceId domain.InterfaceIdentifier,
@@ -375,56 +376,50 @@ func (r *WgRepo) SavePeer(
 	updateFunc func(pp *domain.PhysicalPeer) (*domain.PhysicalPeer, error),
 ) error {
 	r.log.Debug("saving peer", "deviceId", deviceId, "peerId", id)
-	physicalPeer, err := r.getOrCreatePeer(deviceId, id)
-	if err != nil {
-		r.log.Error("failed to get or create peer", "deviceId", deviceId, "peerId", id, "error", err)
+
+	// Try to get existing peer to pass to updateFunc
+	existingPeer, err := r.getPeer(deviceId, id)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		r.log.Error("failed to check peer existence", "deviceId", deviceId, "peerId", id, "error", err)
 		return err
 	}
 
-	physicalPeer, err = updateFunc(physicalPeer)
+	// If peer doesn't exist, create empty one for updateFunc
+	if existingPeer == nil {
+		existingPeer = &domain.PhysicalPeer{
+			Identifier: id,
+		}
+	}
+
+	// Apply updates via callback
+	physicalPeer, err := updateFunc(existingPeer)
 	if err != nil {
 		r.log.Error("peer update function failed", "deviceId", deviceId, "peerId", id, "error", err)
 		return err
 	}
 
-	if err := r.updatePeer(deviceId, physicalPeer); err != nil {
-		r.log.Error("failed to update peer", "deviceId", deviceId, "peerId", id, "error", err)
+	// Optimized: Single syscall for both create and update
+	// UpdateOnly=false allows peer creation if it doesn't exist
+	// This replaces the two-step process (getOrCreatePeer + updatePeer)
+	cfg := wgtypes.PeerConfig{
+		PublicKey:                   physicalPeer.GetPublicKey(),
+		Remove:                      false,
+		UpdateOnly:                  false, // Allow creation if peer doesn't exist
+		PresharedKey:                physicalPeer.GetPresharedKey(),
+		Endpoint:                    physicalPeer.GetEndpointAddress(),
+		PersistentKeepaliveInterval: physicalPeer.GetPersistentKeepaliveTime(),
+		ReplaceAllowedIPs:           true,
+		AllowedIPs:                  physicalPeer.GetAllowedIPs(),
+	}
+
+	err = r.wg.ConfigureDevice(string(deviceId), wgtypes.Config{ReplacePeers: false, Peers: []wgtypes.PeerConfig{cfg}})
+	if err != nil {
+		r.log.Error("failed to configure device for peer save", "deviceId", deviceId, "peerId", id, "error", err)
 		return err
 	}
 
 	r.log.Debug("successfully saved peer", "deviceId", deviceId, "peerId", id)
 	return nil
-}
-
-func (r *WgRepo) getOrCreatePeer(deviceId domain.InterfaceIdentifier, id domain.PeerIdentifier) (
-	*domain.PhysicalPeer,
-	error,
-) {
-	peer, err := r.getPeer(deviceId, id)
-	if err == nil {
-		return peer, nil // peer exists
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("peer error: %w", err) // unknown error
-	}
-
-	// create new peer
-	err = r.wg.ConfigureDevice(string(deviceId), wgtypes.Config{
-		Peers: []wgtypes.PeerConfig{
-			{
-				PublicKey: id.ToPublicKey(),
-			},
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("peer create error for %s: %w", id.ToPublicKey(), err)
-	}
-
-	peer, err = r.getPeer(deviceId, id)
-	if err != nil {
-		return nil, fmt.Errorf("peer error after create: %w", err)
-	}
-	return peer, nil
 }
 
 func (r *WgRepo) getPeer(deviceId domain.InterfaceIdentifier, id domain.PeerIdentifier) (*domain.PhysicalPeer, error) {
@@ -448,27 +443,6 @@ func (r *WgRepo) getPeer(deviceId domain.InterfaceIdentifier, id domain.PeerIden
 	}
 
 	return nil, os.ErrNotExist
-}
-
-func (r *WgRepo) updatePeer(deviceId domain.InterfaceIdentifier, pp *domain.PhysicalPeer) error {
-	cfg := wgtypes.PeerConfig{
-		PublicKey:                   pp.GetPublicKey(),
-		Remove:                      false,
-		UpdateOnly:                  true,
-		PresharedKey:                pp.GetPresharedKey(),
-		Endpoint:                    pp.GetEndpointAddress(),
-		PersistentKeepaliveInterval: pp.GetPersistentKeepaliveTime(),
-		ReplaceAllowedIPs:           true,
-		AllowedIPs:                  pp.GetAllowedIPs(),
-	}
-
-	err := r.wg.ConfigureDevice(string(deviceId), wgtypes.Config{ReplacePeers: false, Peers: []wgtypes.PeerConfig{cfg}})
-	if err != nil {
-		r.log.Error("failed to configure device for peer update", "deviceId", deviceId, "peerId", pp.Identifier, "error", err)
-		return err
-	}
-
-	return nil
 }
 
 // DeletePeer deletes the peer with the given id.

@@ -2,6 +2,7 @@
 
 advanced:
   log_level: trace
+  expiry_check_interval: 5h  # How often to check for and delete expired peers (cluster-wide: only master node deletes, others skip)
 
 core:
   admin_user: test@test.de
@@ -11,6 +12,7 @@ core:
   default_user_ttl: "24h"  # TTL for peers: 1h, 24h, 2d, 7d, etc.
   delete_expired_peers: true  # true = delete, false = disable expired peers
   force_client_ip_as_allowed_ip: true  # Always use client's IP as AllowedIPs on server (prevents overlapping 0.0.0.0/0)
+  master: false  # Set to true on ONE node only - that node will handle expired peer deletion (master-only cleanup for cluster safety)
 
 web:
   external_url: http://localhost:8888

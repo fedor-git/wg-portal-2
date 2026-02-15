@@ -67,7 +67,7 @@ func (e ProvisioningEndpoint) overrideAllowedIPsForAPI(ctx context.Context, peer
 	if peer == nil || peer.Interface.Type != domain.InterfaceTypeClient {
 		return
 	}
-	
+
 	iface, _, err := e.interfaces.GetById(ctx, peer.InterfaceIdentifier)
 	if err == nil {
 		peer.AllowedIPsStr.Value = iface.PeerDefAllowedIPsStr

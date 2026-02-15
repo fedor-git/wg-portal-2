@@ -294,7 +294,13 @@ func (m Manager) CreatePeer(ctx context.Context, peer *domain.Peer) (*domain.Pee
 		return nil, fmt.Errorf("creation failure: %w", err)
 	}
 
-	m.bus.Publish(app.TopicPeerCreated, *peer)               // Webhooks receive full peer
+	m.bus.Publish(app.TopicPeerCreated, *peer) // Webhooks receive full peer
+
+	// Publish event-driven sync event with timestamp for delay monitoring
+	slog.Info("[PEER_CREATE_SYNC] publishing peer created event for other nodes",
+		"peer_id", peer.Identifier,
+		"interface", peer.InterfaceIdentifier,
+		"timestamp_unix_ns", time.Now().UnixNano())
 	m.bus.Publish(app.TopicPeerCreatedSync, peer.Identifier) // Other nodes receive only ID for event-driven sync
 
 	return peer, nil
@@ -340,6 +346,104 @@ func (m Manager) CreateMultiplePeers(
 	}
 
 	return createdPeers, nil
+}
+
+// hasMeaningfulChanges checks if peer change is meaningful for cluster sync.
+// Returns true only if WireGuard-relevant fields changed, not just timestamps.
+// This prevents cluster-wide syncs when only internal timestamps are updated.
+func hasMeaningfulChanges(oldPeer, newPeer *domain.Peer) bool {
+	// Check WireGuard-relevant fields
+	if oldPeer.AllowedIPsStr != newPeer.AllowedIPsStr {
+		return true
+	}
+	if oldPeer.ExtraAllowedIPsStr != newPeer.ExtraAllowedIPsStr {
+		return true
+	}
+	if oldPeer.Endpoint != newPeer.Endpoint {
+		return true
+	}
+	if oldPeer.EndpointPublicKey != newPeer.EndpointPublicKey {
+		return true
+	}
+	if oldPeer.PresharedKey != newPeer.PresharedKey {
+		return true
+	}
+	if oldPeer.PersistentKeepalive != newPeer.PersistentKeepalive {
+		return true
+	}
+
+	// Check Portal-relevant state changes
+	if (oldPeer.Disabled == nil) != (newPeer.Disabled == nil) {
+		return true // Disabled state changed
+	}
+	if oldPeer.Disabled != nil && newPeer.Disabled != nil && !oldPeer.Disabled.Equal(*newPeer.Disabled) {
+		return true // Disabled time changed
+	}
+	if oldPeer.DisabledReason != newPeer.DisabledReason {
+		return true
+	}
+	// NOTE: We do NOT check ExpiresAt for sync
+	// Reason: ExpiresAt is a local TTL timer for cleanup, not peer configuration
+	// Each node may have different expiration times; sync is not needed
+	// TTL changes (peer disconnect/connect) should NOT trigger cluster-wide syncs
+
+	if oldPeer.DisplayName != newPeer.DisplayName {
+		return true
+	}
+	if oldPeer.Notes != newPeer.Notes {
+		return true
+	}
+
+	// Check Interface settings - compare key fields that matter for WireGuard config
+	if oldPeer.Interface.CheckAliveAddress != newPeer.Interface.CheckAliveAddress {
+		return true
+	}
+	if oldPeer.Interface.DnsStr != newPeer.Interface.DnsStr {
+		return true
+	}
+	if oldPeer.Interface.DnsSearchStr != newPeer.Interface.DnsSearchStr {
+		return true
+	}
+	if oldPeer.Interface.Mtu != newPeer.Interface.Mtu {
+		return true
+	}
+	if oldPeer.Interface.FirewallMark != newPeer.Interface.FirewallMark {
+		return true
+	}
+	if oldPeer.Interface.RoutingTable != newPeer.Interface.RoutingTable {
+		return true
+	}
+	if oldPeer.Interface.PreUp != newPeer.Interface.PreUp {
+		return true
+	}
+	if oldPeer.Interface.PostUp != newPeer.Interface.PostUp {
+		return true
+	}
+	if oldPeer.Interface.PreDown != newPeer.Interface.PreDown {
+		return true
+	}
+	if oldPeer.Interface.PostDown != newPeer.Interface.PostDown {
+		return true
+	}
+	// Compare public key
+	if oldPeer.Interface.PublicKey != newPeer.Interface.PublicKey {
+		return true
+	}
+	if oldPeer.Interface.Type != newPeer.Interface.Type {
+		return true
+	}
+	// Compare addresses - need custom comparison due to slice
+	if len(oldPeer.Interface.Addresses) != len(newPeer.Interface.Addresses) {
+		return true
+	}
+	for i, oldAddr := range oldPeer.Interface.Addresses {
+		if i >= len(newPeer.Interface.Addresses) || oldAddr != newPeer.Interface.Addresses[i] {
+			return true
+		}
+	}
+
+	// If we reach here, only internal timestamps changed (UpdatedAt, UpdatedBy)
+	return false
 }
 
 // UpdatePeer updates the given peer.
@@ -406,8 +510,21 @@ func (m Manager) UpdatePeer(ctx context.Context, peer *domain.Peer) (*domain.Pee
 		}
 	}
 
-	m.bus.Publish(app.TopicPeerUpdated, *peer)               // Webhooks receive full peer
-	m.bus.Publish(app.TopicPeerUpdatedSync, peer.Identifier) // Other nodes receive only ID for event-driven sync
+	m.bus.Publish(app.TopicPeerUpdated, *peer) // Webhooks receive full peer
+
+	// CRITICAL: Only publish sync event if something meaningful changed
+	// If only internal timestamps (UpdatedAt, UpdatedBy) changed, don't trigger cluster-wide sync
+	if hasMeaningfulChanges(existingPeer, peer) {
+		slog.Info("[PEER_UPDATE_SYNC] publishing peer updated event for other nodes",
+			"peer_id", peer.Identifier,
+			"interface", peer.InterfaceIdentifier,
+			"timestamp_unix_ns", time.Now().UnixNano())
+		m.bus.Publish(app.TopicPeerUpdatedSync, peer.Identifier) // Other nodes receive only ID for event-driven sync
+	} else {
+		slog.Debug("[PEER_UPDATE_SYNC] skipping sync event - only internal timestamps changed",
+			"peer_id", peer.Identifier,
+			"interface", peer.InterfaceIdentifier)
+	}
 
 	return peer, nil
 }
@@ -442,7 +559,13 @@ func (m Manager) DeletePeer(ctx context.Context, id domain.PeerIdentifier) error
 		return fmt.Errorf("failed to delete peer %s: %w", id, err)
 	}
 
-	m.bus.Publish(app.TopicPeerDeleted, *peer)               // Webhooks receive full peer
+	m.bus.Publish(app.TopicPeerDeleted, *peer) // Webhooks receive full peer
+
+	// Publish event-driven sync event with timestamp for delay monitoring
+	slog.Info("[PEER_DELETE_SYNC] publishing peer deleted event for other nodes",
+		"peer_id", peer.Identifier,
+		"interface", peer.InterfaceIdentifier,
+		"timestamp_unix_ns", time.Now().UnixNano())
 	m.bus.Publish(app.TopicPeerDeletedSync, peer.Identifier) // Other nodes receive only ID for event-driven sync
 	// Update routes after peers have changed
 	m.bus.Publish(app.TopicRouteUpdate, "peers updated")

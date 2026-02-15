@@ -49,7 +49,7 @@ func main() {
 	rawDb, err := adapters.NewDatabase(cfg.Database)
 	internal.AssertNoError(err)
 
-	database, err := adapters.NewSqlRepository(rawDb)
+	database, err := adapters.NewSqlRepository(rawDb, cfg)
 	internal.AssertNoError(err)
 
 	wireGuard, err := wireguard.NewControllerManager(cfg)
@@ -107,7 +107,7 @@ func main() {
 
 	cfgFileManager, err := configfile.NewConfigFileManager(cfg, eventBus, database, database, cfgFileSystem)
 	internal.AssertNoError(err)
-    cfgFileManager.StartBackgroundJobs(ctx)
+	cfgFileManager.StartBackgroundJobs(ctx)
 
 	mailManager, err := mail.NewMailManager(cfg, mailer, cfgFileManager, database, database)
 	internal.AssertNoError(err)
@@ -153,7 +153,7 @@ func main() {
 	apiV0EndpointInterfaces := handlersV0.NewInterfaceEndpoint(cfg, apiV0Auth, validatorManager, apiV0BackendInterfaces)
 
 	apiV0EndpointPeers := handlersV0.NewPeerEndpoint(cfg, apiV0Auth, validatorManager, apiV0BackendPeers)
-	
+
 	apiV0EndpointPeers.SetEventBus(eventBus)
 
 	apiV0EndpointConfig := handlersV0.NewConfigEndpoint(cfg, apiV0Auth, wireGuard)

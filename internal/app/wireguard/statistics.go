@@ -47,6 +47,8 @@ type StatisticsDatabaseRepo interface {
 type StatisticsMetricsServer interface {
 	UpdateInterfaceMetrics(status domain.InterfaceStatus)
 	UpdatePeerMetrics(peer *domain.Peer, status domain.PeerStatus)
+	UpdatePeerMetricsValues(peer *domain.Peer, status domain.PeerStatus)
+	RegisterPeerMetrics(peer *domain.Peer)
 	RemovePeerMetrics(peer *domain.Peer)
 	RemovePeerMetricsByID(peerId string)
 }
@@ -283,6 +285,19 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 									lastHandshake = &peer.LastHandshake
 								}
 
+								// OPTIMIZATION: Check if stats actually changed before updating
+								// Skip update if bytes and handshake haven't changed
+								statsChanged := p.BytesReceived != peer.BytesUpload ||
+									p.BytesTransmitted != peer.BytesDownload ||
+									(lastHandshake == nil) != (p.LastHandshake == nil) ||
+									(lastHandshake != nil && p.LastHandshake != nil && !lastHandshake.Equal(*p.LastHandshake)) ||
+									p.Endpoint != peer.Endpoint
+
+								if !statsChanged && p.IsConnected {
+									// Nothing changed for this connected peer - skip update
+									return p, nil
+								}
+
 								// calculate if session was restarted
 								p.UpdatedAt = time.Now()
 								p.LastSessionStart = getSessionStartTime(*p, peer.BytesUpload, peer.BytesDownload,
@@ -318,6 +333,19 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 								var lastHandshake *time.Time
 								if !peer.LastHandshake.IsZero() {
 									lastHandshake = &peer.LastHandshake
+								}
+
+								// OPTIMIZATION: Only update disconnected/idle peers if they actually changed state
+								// Skip update if peer remains disconnected and nothing meaningful changed
+								if !wasConnected && !isConnected {
+									// Peer was and remains disconnected
+									// Only update if there are new bytes or it transitioned state
+									if p.BytesReceived == peer.BytesUpload &&
+										p.BytesTransmitted == peer.BytesDownload &&
+										!p.IsConnected {
+										// Nothing changed - skip database write
+										return p, nil
+									}
 								}
 
 								// calculate if session was restarted
@@ -487,64 +515,63 @@ func (c *StatisticsCollector) pingWorker(ctx context.Context) {
 		var connectionStateChanged bool
 		var newPeerStatus domain.PeerStatus
 
-		peerPingable := c.isPeerPingable(ctx, backend, peer)
-		slog.Debug("peer ping check completed", "peer", peer.Identifier, "pingable", peerPingable)
+		// OPTIMIZATION: Use WireGuard kernel LastHandshakeTime instead of ICMP ping checks
+		// This is more reliable (real activity) and has zero CPU overhead
+		// Get all physical peers from WireGuard kernel to extract LastHandshake timestamp
+		physicalPeers, err := c.wg.GetControllerByName(backend).GetPeers(ctx, peer.InterfaceIdentifier)
+		if err != nil {
+			slog.Debug("failed to get physical peers for last handshake check", "interface", peer.InterfaceIdentifier, "error", err)
+			// If we can't get peer data, skip status update
+			continue
+		}
 
-		now := time.Now()
-
-		// If peer is pingable/connected, claim ownership for this node
-		// This ensures only the node where the peer is connected updates its status
-		if peerPingable {
-			err := c.db.ClaimPeerStatus(ctx, peer.Identifier, c.cfg.Core.ClusterNodeId,
-				func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
-					wasConnected := p.IsConnected
-
-					p.IsPingable = true
-					p.LastPing = &now
-					p.UpdatedAt = time.Now()
-					p.CalcConnected()
-
-					if wasConnected != p.IsConnected {
-						connectionStateChanged = true
-						newPeerStatus = *p // store new status for event publishing
-					}
-
-					// Update prometheus metrics
-					go c.updatePeerMetrics(ctx, *p)
-
-					return p, nil
-				})
-			if err != nil {
-				slog.Warn("failed to claim and update peer ping status", "peer", peer.Identifier, "node", c.cfg.Core.ClusterNodeId, "error", err)
-			} else {
-				slog.Debug("claimed and updated peer ping status", "peer", peer.Identifier, "node", c.cfg.Core.ClusterNodeId)
+		// Find the matching peer by identifier
+		var physicalPeer *domain.PhysicalPeer
+		for i := range physicalPeers {
+			if physicalPeers[i].Identifier == peer.Identifier {
+				physicalPeer = &physicalPeers[i]
+				break
 			}
+		}
+
+		if physicalPeer == nil {
+			slog.Debug("peer not found in WireGuard kernel", "peer", peer.Identifier, "interface", peer.InterfaceIdentifier)
+			// If peer not in kernel, skip status update
+			continue
+		}
+
+		// Update peer status based on WireGuard LastHandshakeTime (not ping)
+		err = c.db.UpdatePeerStatus(ctx, peer.Identifier,
+			func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
+				wasConnected := p.IsConnected
+
+				// Use WireGuard LastHandshakeTime to determine connectivity
+				// This is more reliable than ICMP ping and has zero CPU cost
+				p.LastHandshake = &physicalPeer.LastHandshake
+				p.Endpoint = physicalPeer.Endpoint
+				p.BytesReceived = physicalPeer.BytesUpload
+				p.BytesTransmitted = physicalPeer.BytesDownload
+				p.UpdatedAt = time.Now()
+
+				// Calculate connected state based on LastHandshake (built-in logic)
+				// If HandshakeTime < 2 minutes = connected
+				p.CalcConnected()
+
+				if wasConnected != p.IsConnected {
+					connectionStateChanged = true
+					newPeerStatus = *p // store new status for event publishing
+					slog.Debug("peer connection state changed", "peer", peer.Identifier, "wasConnected", wasConnected, "nowConnected", p.IsConnected, "lastHandshake", p.LastHandshake)
+				}
+
+				// Update prometheus metrics async
+				go c.updatePeerMetrics(ctx, *p)
+
+				return p, nil
+			})
+		if err != nil {
+			slog.Warn("failed to update peer handshake status", "peer", peer.Identifier, "error", err)
 		} else {
-			// For unpingable peers, use regular update (doesn't claim ownership)
-			err := c.db.UpdatePeerStatus(ctx, peer.Identifier,
-				func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
-					wasConnected := p.IsConnected
-
-					p.IsPingable = false
-					p.LastPing = nil
-					p.UpdatedAt = time.Now()
-					p.CalcConnected()
-
-					if wasConnected != p.IsConnected {
-						connectionStateChanged = true
-						newPeerStatus = *p // store new status for event publishing
-					}
-
-					// Update prometheus metrics
-					go c.updatePeerMetrics(ctx, *p)
-
-					return p, nil
-				})
-			if err != nil {
-				slog.Warn("failed to update peer ping status", "peer", peer.Identifier, "error", err)
-			} else {
-				slog.Debug("updated peer ping status", "peer", peer.Identifier)
-			}
+			slog.Debug("updated peer status from WireGuard LastHandshakeTime", "peer", peer.Identifier, "lastHandshake", physicalPeer.LastHandshake)
 		}
 
 		if connectionStateChanged {
@@ -552,13 +579,13 @@ func (c *StatisticsCollector) pingWorker(ctx context.Context) {
 			c.bus.Publish(app.TopicPeerStateChanged, newPeerStatus, peer)
 		}
 
-		// Add delay between updates to reduce concurrent database operations and connection pool exhaustion
-		// With 3 workers and 283 peers, spreading updates over time prevents "Too many connections" errors
-		// 100ms per peer × 3 workers = ~9.4 seconds total per cycle
+		// Add delay between updates to reduce concurrent database operations
+		// Even though we removed ping checks (zero wait), keep this delay to avoid connection pool exhaustion
+		// 10ms per peer × workers = minimal delay while preventing database overload
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(10 * time.Millisecond):
 		}
 	}
 }
@@ -601,7 +628,10 @@ func (c *StatisticsCollector) updatePeerMetrics(ctx context.Context, status doma
 		slog.Debug("skipping metrics update for orphaned peer", "peer", status.PeerId)
 		return
 	}
-	c.ms.UpdatePeerMetrics(peer, status)
+	// OPTIMIZATION: Use UpdatePeerMetricsValues instead of UpdatePeerMetrics
+	// UpdatePeerMetricsValues only updates values without removing/re-registering metrics
+	// This is called frequently (every statistics collection cycle) and should be very fast
+	c.ms.UpdatePeerMetricsValues(peer, status)
 }
 
 func (c *StatisticsCollector) connectToMessageBus() {

@@ -29,7 +29,7 @@ type HealthStatus struct {
 type MetricsServer struct {
 	*http.Server
 
-	DB  *gorm.DB        // Database connection
+	DB  *gorm.DB       // Database connection
 	cfg *config.Config // Configuration
 
 	registry *prometheus.Registry
@@ -41,8 +41,8 @@ type MetricsServer struct {
 	peerReceivedBytesTotal   *prometheus.GaugeVec
 	peerSendBytesTotal       *prometheus.GaugeVec
 
-	healthStatus  *HealthStatus
-	healthMutex   sync.RWMutex
+	healthStatus *HealthStatus
+	healthMutex  sync.RWMutex
 }
 
 // Wireguard metrics labels
@@ -54,87 +54,87 @@ var (
 // NewMetricsServer returns a new prometheus server
 func NewMetricsServer(cfg *config.Config, db *gorm.DB) *MetricsServer {
 	// Create a new custom registry
-       reg := prometheus.NewRegistry()
+	reg := prometheus.NewRegistry()
 
-       mux := http.NewServeMux()
-       mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
 
-       ms := &MetricsServer{
-	       Server: &http.Server{
-		       Addr:    cfg.Statistics.ListeningAddress,
-		       Handler: mux,
-	       },
-	       DB:  db,
-	       cfg: cfg,
-	       registry: reg,
+	ms := &MetricsServer{
+		Server: &http.Server{
+			Addr:    cfg.Statistics.ListeningAddress,
+			Handler: mux,
+		},
+		DB:       db,
+		cfg:      cfg,
+		registry: reg,
 
-	       healthStatus: &HealthStatus{
-		       Health:        true,
-		       DatabaseOk:    true,
-		       SyncOk:        true,
-		       LastCheckTime: time.Now(),
-	       },
+		healthStatus: &HealthStatus{
+			Health:        true,
+			DatabaseOk:    true,
+			SyncOk:        true,
+			LastCheckTime: time.Now(),
+		},
 
-	       ifaceReceivedBytesTotal: prometheus.NewGaugeVec(
-		       prometheus.GaugeOpts{
-			       Name: "wireguard_interface_received_bytes_total",
-			       Help: "Bytes received through the interface.",
-		       }, ifaceLabels,
-	       ),
-	       ifaceSendBytesTotal: prometheus.NewGaugeVec(
-		       prometheus.GaugeOpts{
-			       Name: "wireguard_interface_sent_bytes_total",
-			       Help: "Bytes sent through the interface.",
-		       }, ifaceLabels,
-	       ),
+		ifaceReceivedBytesTotal: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "wireguard_interface_received_bytes_total",
+				Help: "Bytes received through the interface.",
+			}, ifaceLabels,
+		),
+		ifaceSendBytesTotal: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "wireguard_interface_sent_bytes_total",
+				Help: "Bytes sent through the interface.",
+			}, ifaceLabels,
+		),
 
-	       peerIsConnected: prometheus.NewGaugeVec(
-		       prometheus.GaugeOpts{
-			       Name: "wireguard_peer_up",
-			       Help: "Peer connection state (boolean: 1/0).",
-		       }, peerLabels,
-	       ),
-	       peerLastHandshakeSeconds: prometheus.NewGaugeVec(
-		       prometheus.GaugeOpts{
-			       Name: "wireguard_peer_last_handshake_seconds",
-			       Help: "Seconds from the last handshake with the peer.",
-		       }, peerLabels,
-	       ),
-	       peerReceivedBytesTotal: prometheus.NewGaugeVec(
-		       prometheus.GaugeOpts{
-			       Name: "wireguard_peer_received_bytes_total",
-			       Help: "Bytes received from the peer.",
-		       }, peerLabels,
-	       ),
-	       peerSendBytesTotal: prometheus.NewGaugeVec(
-		       prometheus.GaugeOpts{
-			       Name: "wireguard_peer_sent_bytes_total",
-			       Help: "Bytes sent to the peer.",
-		       }, peerLabels,
-	       ),
-       }
+		peerIsConnected: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "wireguard_peer_up",
+				Help: "Peer connection state (boolean: 1/0).",
+			}, peerLabels,
+		),
+		peerLastHandshakeSeconds: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "wireguard_peer_last_handshake_seconds",
+				Help: "Seconds from the last handshake with the peer.",
+			}, peerLabels,
+		),
+		peerReceivedBytesTotal: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "wireguard_peer_received_bytes_total",
+				Help: "Bytes received from the peer.",
+			}, peerLabels,
+		),
+		peerSendBytesTotal: prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "wireguard_peer_sent_bytes_total",
+				Help: "Bytes sent to the peer.",
+			}, peerLabels,
+		),
+	}
 
-       reg.MustRegister(
-	       ms.ifaceReceivedBytesTotal,
-	       ms.ifaceSendBytesTotal,
-	       ms.peerIsConnected,
-       )
+	reg.MustRegister(
+		ms.ifaceReceivedBytesTotal,
+		ms.ifaceSendBytesTotal,
+		ms.peerIsConnected,
+	)
 
-       if cfg.Statistics.ExportDetailedPeerMetrics {
-	       reg.MustRegister(
-		       ms.peerLastHandshakeSeconds,
-		       ms.peerReceivedBytesTotal,
-		       ms.peerSendBytesTotal,
-	       )
-	       slog.Info("Detailed peer metrics enabled (handshake, bytes received/transmitted)")
-       } else {
-	       slog.Info("Detailed peer metrics disabled (only peer_up will be exported)")
-       }
+	if cfg.Statistics.ExportDetailedPeerMetrics {
+		reg.MustRegister(
+			ms.peerLastHandshakeSeconds,
+			ms.peerReceivedBytesTotal,
+			ms.peerSendBytesTotal,
+		)
+		slog.Info("Detailed peer metrics enabled (handshake, bytes received/transmitted)")
+	} else {
+		slog.Info("Detailed peer metrics disabled (only peer_up will be exported)")
+	}
 
-       // Add health check endpoint
-       mux.HandleFunc("/health", ms.handleHealth)
+	// Add health check endpoint
+	mux.HandleFunc("/health", ms.handleHealth)
 
-       return ms
+	return ms
 }
 
 // Run starts the metrics server. The function blocks until the context is cancelled.
@@ -179,202 +179,238 @@ func (m *MetricsServer) UpdateInterfaceMetrics(status domain.InterfaceStatus) {
 	slog.Debug("Setting ifaceSendBytesTotal", "value", status.BytesTransmitted)
 }
 
-// UpdatePeerMetrics updates the metrics for the given peer
+// RegisterPeerMetrics registers metrics for a peer without removing existing ones.
+// This should be called ONCE when a peer is created or on startup.
+// It does NOT remove existing metrics, making it efficient for initial registration.
+func (m *MetricsServer) RegisterPeerMetrics(peer *domain.Peer) {
+	labels := []string{
+		string(peer.InterfaceIdentifier),
+		peer.CheckAliveAddress(),
+		string(peer.Identifier),
+		peer.DisplayName,
+	}
+
+	if labels[2] == "" {
+		slog.Warn("Skip RegisterPeerMetrics: id label is empty", "peerID", peer.Identifier)
+		return
+	}
+
+	// Initialize metrics if they don't already exist
+	// WithLabelValues is idempotent - calling twice with same labels is safe
+	m.peerIsConnected.WithLabelValues(labels...).Add(0)
+
+	if m.cfg.Statistics.ExportDetailedPeerMetrics {
+		m.peerLastHandshakeSeconds.WithLabelValues(labels...).Add(0)
+		m.peerReceivedBytesTotal.WithLabelValues(labels...).Add(0)
+		m.peerSendBytesTotal.WithLabelValues(labels...).Add(0)
+	}
+}
+
+// UpdatePeerMetricsValues updates ONLY the values of metrics for the given peer.
+// This should be called frequently (on every statistics collection).
+// It does NOT re-register or remove metrics, making it very efficient.
+// If labels have changed (name, address), call RegisterPeerMetrics to update them.
+// NOTE: This function uses lazy registration - metrics are registered on first update if needed
+func (m *MetricsServer) UpdatePeerMetricsValues(peer *domain.Peer, status domain.PeerStatus) {
+	labels := []string{
+		string(peer.InterfaceIdentifier),
+		peer.CheckAliveAddress(),
+		string(status.PeerId),
+		peer.DisplayName,
+	}
+
+	if labels[2] == "" {
+		slog.Warn("Skip UpdatePeerMetricsValues: id label is empty", "peerID", peer.Identifier)
+		return
+	}
+
+	// Lazy registration: metrics are initialized on first use
+	// This ensures metrics exist before we try to set values
+	// WithLabelValues is idempotent - calling multiple times is safe
+	m.peerIsConnected.WithLabelValues(labels...).Set(internal.BoolToFloat64(status.IsConnected))
+
+	// ALWAYS update LastHandshake - it's the most important metric for lifecycle tracking
+	// This metric is needed regardless of export_detailed_peer_metrics setting
+	if status.LastHandshake != nil {
+		m.peerLastHandshakeSeconds.WithLabelValues(labels...).Set(float64(status.LastHandshake.Unix()))
+	}
+
+	// Only export detailed metrics (bytes, etc) if configured
+	// This reduces load when export_detailed_peer_metrics: false
+	if m.cfg.Statistics.ExportDetailedPeerMetrics {
+		m.peerReceivedBytesTotal.WithLabelValues(labels...).Set(float64(status.BytesReceived))
+		m.peerSendBytesTotal.WithLabelValues(labels...).Set(float64(status.BytesTransmitted))
+	}
+}
+
+// UpdatePeerMetrics is deprecated - use RegisterPeerMetrics() on startup and UpdatePeerMetricsValues() in loops instead
 func (m *MetricsServer) UpdatePeerMetrics(peer *domain.Peer, status domain.PeerStatus) {
-       labels := []string{
-	       string(peer.InterfaceIdentifier),
-	       peer.CheckAliveAddress(), // addresses label now contains only the ping address
-	       string(status.PeerId),
-	       peer.DisplayName,
-       }
-
-       if labels[2] == "" {
-	       slog.Warn("Skip UpdatePeerMetrics: id label is empty", "labels", labels, "peerID", peer.Identifier)
-	       return
-       }
-
-       // First, remove any existing metrics for this peer ID to prevent duplicates
-       // This is necessary because label values (like name or addresses) might have changed
-       m.removePeerMetricsByIDInternal(string(status.PeerId))
-
-       // Add debug logs for peer metrics registration
-       slog.Debug("Registering peer metrics", "labels", labels, "peerID", peer.Identifier, "name", peer.DisplayName)
-       slog.Debug("Setting peerIsConnected", "value", internal.BoolToFloat64(status.IsConnected))
-       m.peerIsConnected.WithLabelValues(labels...).Set(internal.BoolToFloat64(status.IsConnected))
-
-       if m.cfg.Statistics.ExportDetailedPeerMetrics {
-	       if status.LastHandshake != nil {
-		       slog.Debug("Setting peerLastHandshakeSeconds", "value", status.LastHandshake.Unix())
-		       m.peerLastHandshakeSeconds.WithLabelValues(labels...).Set(float64(status.LastHandshake.Unix()))
-	       }
-	       slog.Debug("Setting peerReceivedBytesTotal", "value", status.BytesReceived)
-	       slog.Debug("Setting peerSendBytesTotal", "value", status.BytesTransmitted)
-	       m.peerReceivedBytesTotal.WithLabelValues(labels...).Set(float64(status.BytesReceived))
-	       m.peerSendBytesTotal.WithLabelValues(labels...).Set(float64(status.BytesTransmitted))
-       }
+	// For backwards compatibility, delegate to the new split functions
+	m.RegisterPeerMetrics(peer)
+	m.UpdatePeerMetricsValues(peer, status)
 }
 
 // removePeerMetricsByIDInternal is an internal method to remove peer metrics without verbose logging
 func (m *MetricsServer) removePeerMetricsByIDInternal(peerId string) {
-       mfs, err := m.registry.Gather()
-       if err != nil {
-	       return
-       }
+	mfs, err := m.registry.Gather()
+	if err != nil {
+		return
+	}
 
-       metricMap := map[string]*prometheus.GaugeVec{
-	       "wireguard_peer_up": m.peerIsConnected,
-       }
+	metricMap := map[string]*prometheus.GaugeVec{
+		"wireguard_peer_up": m.peerIsConnected,
+	}
 
-       if m.cfg.Statistics.ExportDetailedPeerMetrics {
-	       metricMap["wireguard_peer_last_handshake_seconds"] = m.peerLastHandshakeSeconds
-	       metricMap["wireguard_peer_received_bytes_total"] = m.peerReceivedBytesTotal
-	       metricMap["wireguard_peer_sent_bytes_total"] = m.peerSendBytesTotal
-       }
+	if m.cfg.Statistics.ExportDetailedPeerMetrics {
+		metricMap["wireguard_peer_last_handshake_seconds"] = m.peerLastHandshakeSeconds
+		metricMap["wireguard_peer_received_bytes_total"] = m.peerReceivedBytesTotal
+		metricMap["wireguard_peer_sent_bytes_total"] = m.peerSendBytesTotal
+	}
 
-       for _, mf := range mfs {
-	       name := mf.GetName()
-	       vec, ok := metricMap[name]
-	       if !ok {
-		       continue
-	       }
-	       for _, mtr := range mf.GetMetric() {
-		       var labelValues []string
-		       var found bool
-		       for _, label := range mtr.GetLabel() {
-			       if label.GetName() == "id" && label.GetValue() == peerId {
-				       found = true
-			       }
-		       }
-		       if found {
-			       // Restore label values in correct order
-			       for _, l := range peerLabels {
-				       val := ""
-				       for _, label := range mtr.GetLabel() {
-					       if label.GetName() == l {
-						       val = label.GetValue()
-						       break
-					       }
-				       }
-				       labelValues = append(labelValues, val)
-			       }
-			       vec.DeleteLabelValues(labelValues...)
-		       }
-	       }
-       }
+	for _, mf := range mfs {
+		name := mf.GetName()
+		vec, ok := metricMap[name]
+		if !ok {
+			continue
+		}
+		for _, mtr := range mf.GetMetric() {
+			var labelValues []string
+			var found bool
+			for _, label := range mtr.GetLabel() {
+				if label.GetName() == "id" && label.GetValue() == peerId {
+					found = true
+				}
+			}
+			if found {
+				// Restore label values in correct order
+				for _, l := range peerLabels {
+					val := ""
+					for _, label := range mtr.GetLabel() {
+						if label.GetName() == l {
+							val = label.GetValue()
+							break
+						}
+					}
+					labelValues = append(labelValues, val)
+				}
+				vec.DeleteLabelValues(labelValues...)
+			}
+		}
+	}
 }
 
 // Remove all peer metrics by id, regardless of other label values
 func (m *MetricsServer) RemovePeerMetrics(peer *domain.Peer) {
-       if peer == nil {
-	       slog.Warn("Attempted to remove metrics for a nil peer")
-	       return
-       }
+	if peer == nil {
+		slog.Warn("Attempted to remove metrics for a nil peer")
+		return
+	}
 
-       peerId := string(peer.Identifier)
-       slog.Debug("Starting removal of metrics for peer by id", "id", peerId, "name", peer.DisplayName)
+	peerId := string(peer.Identifier)
+	slog.Debug("Starting removal of metrics for peer by id", "id", peerId, "name", peer.DisplayName)
 
-       mfs, err := m.registry.Gather()
-       if err != nil {
-	       slog.Warn("Failed to gather metrics for removal", "err", err)
-	       return
-       }
+	mfs, err := m.registry.Gather()
+	if err != nil {
+		slog.Warn("Failed to gather metrics for removal", "err", err)
+		return
+	}
 
-       metricMap := map[string]*prometheus.GaugeVec{
-	       "wireguard_peer_up": m.peerIsConnected,
-       }
+	metricMap := map[string]*prometheus.GaugeVec{
+		"wireguard_peer_up": m.peerIsConnected,
+	}
 
-       if m.cfg.Statistics.ExportDetailedPeerMetrics {
-	       metricMap["wireguard_peer_last_handshake_seconds"] = m.peerLastHandshakeSeconds
-	       metricMap["wireguard_peer_received_bytes_total"] = m.peerReceivedBytesTotal
-	       metricMap["wireguard_peer_sent_bytes_total"] = m.peerSendBytesTotal
-       }
+	if m.cfg.Statistics.ExportDetailedPeerMetrics {
+		metricMap["wireguard_peer_last_handshake_seconds"] = m.peerLastHandshakeSeconds
+		metricMap["wireguard_peer_received_bytes_total"] = m.peerReceivedBytesTotal
+		metricMap["wireguard_peer_sent_bytes_total"] = m.peerSendBytesTotal
+	}
 
-       for _, mf := range mfs {
-	       name := mf.GetName()
-	       vec, ok := metricMap[name]
-	       if !ok {
-		       continue
-	       }
-	       for _, mtr := range mf.GetMetric() {
-		       var labelValues []string
-		       var found bool
-		       for _, label := range mtr.GetLabel() {
-			       if label.GetName() == "id" && label.GetValue() == peerId {
-				       found = true
-			       }
-		       }
-		       if found {
-			       for _, l := range peerLabels {
-				       val := ""
-				       for _, label := range mtr.GetLabel() {
-					       if label.GetName() == l {
-						       val = label.GetValue()
-						       break
-					       }
-				       }
-				       labelValues = append(labelValues, val)
-			       }
-			       vec.DeleteLabelValues(labelValues...)
-			       slog.Debug("Removed metric by id", "metric", name, "id", peerId, "labels", labelValues)
-		       }
-	       }
-       }
+	for _, mf := range mfs {
+		name := mf.GetName()
+		vec, ok := metricMap[name]
+		if !ok {
+			continue
+		}
+		for _, mtr := range mf.GetMetric() {
+			var labelValues []string
+			var found bool
+			for _, label := range mtr.GetLabel() {
+				if label.GetName() == "id" && label.GetValue() == peerId {
+					found = true
+				}
+			}
+			if found {
+				for _, l := range peerLabels {
+					val := ""
+					for _, label := range mtr.GetLabel() {
+						if label.GetName() == l {
+							val = label.GetValue()
+							break
+						}
+					}
+					labelValues = append(labelValues, val)
+				}
+				vec.DeleteLabelValues(labelValues...)
+				slog.Debug("Removed metric by id", "metric", name, "id", peerId, "labels", labelValues)
+			}
+		}
+	}
 
-       slog.Info("Completed removal of metrics for peer by id", "id", peerId, "name", peer.DisplayName)
+	slog.Info("Completed removal of metrics for peer by id", "id", peerId, "name", peer.DisplayName)
 }
 
 // Remove all peer metrics by id only (for when peer object is no longer available)
 func (m *MetricsServer) RemovePeerMetricsByID(peerId string) {
-       slog.Debug("Starting removal of metrics for peer by id", "id", peerId, "name", "unknown")
+	slog.Debug("Starting removal of metrics for peer by id", "id", peerId, "name", "unknown")
 
-       mfs, err := m.registry.Gather()
-       if err != nil {
-	       slog.Warn("Failed to gather metrics for removal", "err", err)
-	       return
-       }
+	mfs, err := m.registry.Gather()
+	if err != nil {
+		slog.Warn("Failed to gather metrics for removal", "err", err)
+		return
+	}
 
-       metricMap := map[string]*prometheus.GaugeVec{
-	       "wireguard_peer_up": m.peerIsConnected,
-       }
+	metricMap := map[string]*prometheus.GaugeVec{
+		"wireguard_peer_up": m.peerIsConnected,
+	}
 
-       if m.cfg.Statistics.ExportDetailedPeerMetrics {
-	       metricMap["wireguard_peer_last_handshake_seconds"] = m.peerLastHandshakeSeconds
-	       metricMap["wireguard_peer_received_bytes_total"] = m.peerReceivedBytesTotal
-	       metricMap["wireguard_peer_sent_bytes_total"] = m.peerSendBytesTotal
-       }
+	if m.cfg.Statistics.ExportDetailedPeerMetrics {
+		metricMap["wireguard_peer_last_handshake_seconds"] = m.peerLastHandshakeSeconds
+		metricMap["wireguard_peer_received_bytes_total"] = m.peerReceivedBytesTotal
+		metricMap["wireguard_peer_sent_bytes_total"] = m.peerSendBytesTotal
+	}
 
-       for _, mf := range mfs {
-	       name := mf.GetName()
-	       vec, ok := metricMap[name]
-	       if !ok {
-		       continue
-	       }
-	       for _, mtr := range mf.GetMetric() {
-		       var labelValues []string
-		       var found bool
-		       for _, label := range mtr.GetLabel() {
-			       if label.GetName() == "id" && label.GetValue() == peerId {
-				       found = true
-			       }
-		       }
-		       if found {
-			       for _, l := range peerLabels {
-				       val := ""
-				       for _, label := range mtr.GetLabel() {
-					       if label.GetName() == l {
-						       val = label.GetValue()
-						       break
-					       }
-				       }
-				       labelValues = append(labelValues, val)
-			       }
-			       vec.DeleteLabelValues(labelValues...)
-			       slog.Debug("Removed metric by id", "metric", name, "id", peerId, "labels", labelValues)
-		       }
-	       }
-       }
+	for _, mf := range mfs {
+		name := mf.GetName()
+		vec, ok := metricMap[name]
+		if !ok {
+			continue
+		}
+		for _, mtr := range mf.GetMetric() {
+			var labelValues []string
+			var found bool
+			for _, label := range mtr.GetLabel() {
+				if label.GetName() == "id" && label.GetValue() == peerId {
+					found = true
+				}
+			}
+			if found {
+				for _, l := range peerLabels {
+					val := ""
+					for _, label := range mtr.GetLabel() {
+						if label.GetName() == l {
+							val = label.GetValue()
+							break
+						}
+					}
+					labelValues = append(labelValues, val)
+				}
+				vec.DeleteLabelValues(labelValues...)
+				slog.Debug("Removed metric by id", "metric", name, "id", peerId, "labels", labelValues)
+			}
+		}
+	}
 
-       slog.Info("Completed removal of metrics for peer by id", "id", peerId, "name", "unknown")
+	slog.Info("Completed removal of metrics for peer by id", "id", peerId, "name", "unknown")
 }
 
 // SetSyncStatus updates the sync status for the health check
