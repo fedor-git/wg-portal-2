@@ -338,8 +338,6 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 							slog.Info("peer connection state changed", "peer", peer.Identifier, "was_connected", wasConnected, "now_connected", p.IsConnected, "lastHandshake", lastHandshake)
 							connectionStateChanged = true
 							newPeerStatus = *p
-						} else {
-							slog.Info("peer status updated", "peer", peer.Identifier, "connected", p.IsConnected, "is_pingable", p.IsPingable, "lastHandshake", lastHandshake)
 						}
 
 						// Update prometheus metrics async
@@ -363,7 +361,6 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 						}
 					} else {
 						// Offline peer - update only if state changed (via updateFunc early-return optimization)
-						slog.Info("updating offline peer", "peer", peer.Identifier, "node_id", c.cfg.Core.ClusterNodeId)
 						err = c.db.UpdatePeerStatus(ctx, peer.Identifier, updateFunc)
 						if err != nil {
 							slog.Warn("failed to update offline peer", "peer", peer.Identifier, "error", err)

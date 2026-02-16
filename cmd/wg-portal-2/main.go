@@ -210,6 +210,11 @@ func main() {
 	go metricsServer.Run(ctx)
 	go webSrv.Run(ctx, cfg.Web.ListeningAddress)
 
+	// Start expired peers cleanup check AFTER web server is ready
+	// This ensures all cluster nodes are initialized before master starts deleting peers
+	// Other nodes will be notified via event bus when peers are deleted
+	wireGuardManager.StartExpiredPeersCheckAfterServer(ctx)
+
 	slog.Info("Application startup complete")
 
 	// Subscribe to the peer.delete topic

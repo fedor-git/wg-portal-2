@@ -128,11 +128,8 @@ func (m Manager) StartBackgroundJobs(ctx context.Context) {
 		close(m.startupComplete)
 	}
 
-	// Start expiry check loop ONLY on master node
-	// Non-master nodes skip this entirely to avoid unnecessary loops
-	if m.cfg.Core.Master {
-		go m.runExpiredPeersCheck(ctx)
-	}
+	// Start expiry check loop moved to StartExpiredPeersCheckAfterServer()
+	// This ensures we only delete expired peers AFTER the web server is fully initialized
 }
 
 // Periodic full sync completely removed:
@@ -149,6 +146,17 @@ func (m Manager) IsStartupComplete() bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// StartExpiredPeersCheckAfterServer starts the expired peers cleanup loop
+// This MUST be called AFTER the web server is fully initialized and ready to accept requests
+// Called from main() to ensure cluster coordination is ready before deleting peers
+func (m Manager) StartExpiredPeersCheckAfterServer(ctx context.Context) {
+	// Start expiry check loop ONLY on master node
+	// Non-master nodes skip this entirely to avoid unnecessary loops
+	if m.cfg.Core.Master {
+		go m.runExpiredPeersCheck(ctx)
 	}
 }
 
@@ -397,8 +405,6 @@ func (m Manager) runExpiredPeersCheck(ctx context.Context) {
 		return
 	}
 
-	ctx = domain.SetUserInfo(ctx, domain.SystemAdminContextUserInfo())
-
 	// Get nodeID from config (hostname fallback to default)
 	nodeID := m.cfg.Core.ClusterNodeId
 	if nodeID == "" {
@@ -406,6 +412,27 @@ func (m Manager) runExpiredPeersCheck(ctx context.Context) {
 	}
 
 	slog.Info("[EXPIRE_CLEANUP] starting expiry check loop on master node", "node_id", nodeID, "interval", m.cfg.Advanced.ExpiryCheckInterval)
+
+	// Run expiry check immediately on startup with background context
+	// Use Background() for startup check to avoid context cancellation during first check
+	dbCtx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
+	expiredPeerIDs, err := m.db.FindAndDeleteExpiredPeersWithLock(dbCtx, nodeID)
+	if err != nil {
+		slog.Error("[EXPIRE_CLEANUP] failed to find and delete expired peers at startup", "error", err)
+	} else if len(expiredPeerIDs) > 0 {
+		slog.Info("[EXPIRE_CLEANUP] found and deleted expired peers at startup", "count", len(expiredPeerIDs), "node_id", nodeID)
+		// Publish batch event for all nodes to handle cleanup locally
+		m.bus.Publish(app.TopicPeersExpiredRemoved, expiredPeerIDs)
+		// Publish individual delete-sync events so other systems get notified (same as API delete)
+		// Use small batches to avoid event bus queue overflow (100 items)
+		for i, peerID := range expiredPeerIDs {
+			m.bus.Publish(app.TopicPeerDeletedSync, domain.PeerIdentifier(peerID))
+			// Every 50 events, add small delay to avoid overwhelming event queue
+			if (i+1)%50 == 0 {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}
 
 	running := true
 	for running {
@@ -420,7 +447,9 @@ func (m Manager) runExpiredPeersCheck(ctx context.Context) {
 
 		// Attempt to delete expired peers with lock (only this master node does this)
 		// Other nodes don't even run this function
-		expiredPeerIDs, err := m.db.FindAndDeleteExpiredPeersWithLock(ctx, nodeID)
+		// Use Background() for periodic checks to avoid cancellation mid-query
+		dbCtx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
+		expiredPeerIDs, err := m.db.FindAndDeleteExpiredPeersWithLock(dbCtx, nodeID)
 		if err != nil {
 			slog.Error("[EXPIRE_CLEANUP] failed to find and delete expired peers", "error", err)
 			continue
@@ -430,9 +459,17 @@ func (m Manager) runExpiredPeersCheck(ctx context.Context) {
 			slog.Info("[EXPIRE_CLEANUP] found and deleted expired peers",
 				"count", len(expiredPeerIDs), "node_id", nodeID)
 
-			// Publish event about deleted peers
-			// Other nodes will delete them locally based on event
+			// Publish batch event for all nodes to handle cleanup locally
 			m.bus.Publish(app.TopicPeersExpiredRemoved, expiredPeerIDs)
+			// Publish individual delete-sync events so other systems get notified (same as API delete)
+			// Use small batches to avoid event bus queue overflow (100 items)
+			for i, peerID := range expiredPeerIDs {
+				m.bus.Publish(app.TopicPeerDeletedSync, domain.PeerIdentifier(peerID))
+				// Every 50 events, add small delay to avoid overwhelming event queue
+				if (i+1)%50 == 0 {
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
 		}
 	}
 }
@@ -678,10 +715,11 @@ func (m Manager) handlePeerInterfaceUpdatedEvent(interfaceId domain.InterfaceIde
 func (m Manager) handlePeersExpiredRemovedEvent(expiredPeerIDs []string) {
 	ctx := context.Background()
 
-	slog.Info("[EXPIRE_CLEANUP] handling expired peers removed event",
-		"count", len(expiredPeerIDs))
+	slog.Info("[EXPIRE_CLEANUP] handling expired peers removed event - START",
+		"count", len(expiredPeerIDs), "node_id", m.cfg.Core.ClusterNodeId)
 
 	if len(expiredPeerIDs) == 0 {
+		slog.Info("[EXPIRE_CLEANUP] no expired peers to process")
 		return
 	}
 
@@ -692,9 +730,16 @@ func (m Manager) handlePeersExpiredRemovedEvent(expiredPeerIDs []string) {
 		return
 	}
 
+	slog.Info("[EXPIRE_CLEANUP] got interfaces for cleanup",
+		"count", len(interfaces), "peers_to_delete", len(expiredPeerIDs))
+
+	deletedFromWg := 0
+	failedFromWg := 0
+
 	for _, iface := range interfaces {
 		localController := m.wg.GetControllerByName(config.LocalBackendName)
 		if localController == nil {
+			slog.Warn("[EXPIRE_CLEANUP] local controller not available", "interface", iface.Identifier)
 			continue
 		}
 
@@ -704,17 +749,22 @@ func (m Manager) handlePeersExpiredRemovedEvent(expiredPeerIDs []string) {
 
 			// Delete from WireGuard
 			if err := localController.DeletePeer(ctx, iface.Identifier, peerIdent); err != nil {
+				failedFromWg++
 				slog.Debug("[EXPIRE_CLEANUP] peer not in WireGuard or already deleted",
-					"interface", iface.Identifier, "peer_id", peerID)
+					"interface", iface.Identifier, "peer_id", peerID, "error", err)
 			} else {
-				slog.Info("[EXPIRE_CLEANUP] removed expired peer from WireGuard",
+				deletedFromWg++
+				slog.Debug("[EXPIRE_CLEANUP] removed expired peer from WireGuard",
 					"interface", iface.Identifier, "peer_id", peerID)
 			}
 		}
 	}
 
-	slog.Info("[EXPIRE_CLEANUP] finished cleaning up expired peers locally",
-		"count", len(expiredPeerIDs))
+	slog.Info("[EXPIRE_CLEANUP] finished cleaning up expired peers locally - COMPLETED",
+		"node_id", m.cfg.Core.ClusterNodeId,
+		"count", len(expiredPeerIDs),
+		"deleted_from_wg", deletedFromWg,
+		"failed_from_wg", failedFromWg)
 }
 
 // handlePeerCreatedSyncEvent syncs a newly created peer to local WireGuard

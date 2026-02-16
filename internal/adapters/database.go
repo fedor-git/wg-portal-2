@@ -1626,19 +1626,36 @@ func (r *SqlRepo) GetExpiredPeers(ctx context.Context) ([]domain.Peer, error) {
 	return peers, nil
 }
 
-// DeletePeersByIDs deletes peers by their Identifier (public key)
+// DeletePeersByIDs deletes peers by their Identifier (public key) and their associated addresses
 // Used when cleaning up expired peers
+// IMPORTANT: Deletes peer_addresses associations first to avoid foreign key constraint violations
 func (r *SqlRepo) DeletePeersByIDs(ctx context.Context, peerIDs []string) (int64, error) {
 	if len(peerIDs) == 0 {
 		return 0, nil
 	}
 
-	result := r.db.WithContext(ctx).
-		Where("identifier IN ?", peerIDs).
-		Delete(&domain.Peer{})
+	// Start transaction to ensure atomic deletion (associations first, then peers)
+	tx := r.db.WithContext(ctx).Begin()
+	if tx.Error != nil {
+		return 0, tx.Error
+	}
 
+	// First: delete peer_addresses many2many associations via raw SQL
+	if err := tx.Table("peer_addresses").Where("peer_identifier IN ?", peerIDs).Delete(nil).Error; err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+
+	// Second: delete peers
+	result := tx.Where("identifier IN ?", peerIDs).Delete(&domain.Peer{})
 	if result.Error != nil {
+		tx.Rollback()
 		return 0, result.Error
+	}
+
+	// Commit transaction
+	if err := tx.Commit().Error; err != nil {
+		return 0, err
 	}
 
 	return result.RowsAffected, nil
