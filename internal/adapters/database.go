@@ -802,13 +802,20 @@ func (r *SqlRepo) upsertPeer(ui *domain.ContextUserInfo, tx *gorm.DB, peer *doma
 }
 
 // DeletePeer deletes the peer with the given id.
+// This also deletes the peer_addresses associations (many-to-many relationships with Cidr)
+// NOTE: We do NOT delete peer_status here.
+// The peer_status will be cleaned up by CleanOrphanedStatuses on all cluster nodes.
+// This ensures that other nodes can detect orphaned statuses and clean up their metrics.
 func (r *SqlRepo) DeletePeer(ctx context.Context, id domain.PeerIdentifier) error {
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// NOTE: We do NOT delete peer_status here.
-		// The peer_status will be cleaned up by CleanOrphanedStatuses on all cluster nodes.
-		// This ensures that other nodes can detect orphaned statuses and clean up their metrics.
+		// First: delete peer_addresses many2many associations to avoid foreign key issues
+		// This is critical because we use raw SQL and explicit deletion like in DeletePeersByIDs
+		if err := tx.Table("peer_addresses").Where("peer_identifier = ?", string(id)).Delete(nil).Error; err != nil {
+			return err
+		}
 
-		err := tx.Select(clause.Associations).Delete(&domain.Peer{Identifier: id}).Error
+		// Second: delete the peer itself
+		err := tx.Where("identifier = ?", string(id)).Delete(&domain.Peer{}).Error
 		if err != nil {
 			return err
 		}

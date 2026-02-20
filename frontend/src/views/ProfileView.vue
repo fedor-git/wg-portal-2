@@ -207,3 +207,40 @@ onMounted(async () => {
     </div>
   </div>
 </div></template>
+<style scoped>
+.copy-peer-link {
+  color: #000;
+  text-decoration: none;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: all 0.15s ease;
+  font-size: 0.9em;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.copy-peer-link:hover {
+  color: #000;
+  text-decoration: none;
+  opacity: 1;
+}
+
+.copy-peer-link i {
+  color: #000;
+}
+
+/* Dark theme colors */
+@media (prefers-color-scheme: dark) {
+  .copy-peer-link {
+    color: #0d6efd;
+  }
+
+  .copy-peer-link:hover {
+    color: #0d6efd;
+  }
+
+  .copy-peer-link i {
+    color: #0d6efd;
+  }
+}
+</style>

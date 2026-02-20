@@ -35,6 +35,26 @@ const userPeers = computed(() => {
   return users.Peers
 })
 
+// Розділяє адреси на IPv4 та IPv6 для кожного піра
+const getPeerAddresses = (addresses) => {
+  if (!addresses) return { ipv4: [], ipv6: [] }
+  
+  let addrsArray = []
+  
+  // Якщо це масив, з'єднуємо в строку
+  if (Array.isArray(addresses)) {
+    addrsArray = addresses.join(',').split(',').map(a => a.trim()).filter(Boolean)
+  } else if (typeof addresses === 'string') {
+    // Якщо це строка, розділяємо по комі
+    addrsArray = addresses.split(',').map(a => a.trim()).filter(Boolean)
+  }
+  
+  return {
+    ipv4: addrsArray.filter(addr => /^\d/.test(addr)),
+    ipv6: addrsArray.filter(addr => addr.includes(':'))
+  }
+}
+
 // functions
 
 watch(() => props.visible, async (newValue, oldValue) => {
@@ -123,7 +143,8 @@ function close() {
             <tr>
               <th scope="col">{{ $t('modals.user-view.peers.name') }}</th>
               <th scope="col">{{ $t('modals.user-view.peers.interface') }}</th>
-              <th scope="col">{{ $t('modals.user-view.peers.ip') }}</th>
+              <th scope="col">{{ $t('modals.user-view.peers.ip') }} (IPv4)</th>
+              <th scope="col">{{ $t('modals.user-view.peers.ip') }} (IPv6)</th>
               <th scope="col"></th><!-- Actions -->
             </tr>
             </thead>
@@ -132,7 +153,10 @@ function close() {
               <td>{{peer.DisplayName}}</td>
               <td>{{peer.InterfaceIdentifier}}</td>
               <td>
-                <span v-for="ip in peer.Addresses" :key="ip" class="badge pill bg-light">{{ ip }}</span>
+                <span v-for="ip in getPeerAddresses(peer.Addresses).ipv4" :key="ip" class="badge pill bg-light">{{ ip }}</span>
+              </td>
+              <td>
+                <span v-for="ip in getPeerAddresses(peer.Addresses).ipv6" :key="ip" class="badge pill bg-light">{{ ip }}</span>
               </td>
             </tr>
             </tbody>

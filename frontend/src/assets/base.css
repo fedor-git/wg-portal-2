@@ -105,3 +105,47 @@ a.disabled {
 .vue-tags-input .ti-deletion-mark:after {
   transform: scaleX(1);
 }
+
+/* Truncated text and copy button styles */
+.truncated-text {
+  display: inline-block;
+  max-width: 20ch;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.copy-btn {
+  color: #000000;
+  text-decoration: none;
+  cursor: pointer;
+  opacity: 0.6;
+  transition: all 0.15s ease;
+  font-size: 0.9em;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.copy-btn:hover {
+  color: #000000;
+  text-decoration: none;
+  opacity: 1;
+}
+
+.copy-btn i {
+  color: #000000;
+}
+
+/* Dark theme colors for copy button */
+[data-bs-theme="dark"] .copy-btn {
+  color: #1e90ff;
+}
+
+[data-bs-theme="dark"] .copy-btn:hover {
+  color: #1e90ff;
+}
+
+[data-bs-theme="dark"] .copy-btn i {
+  color: #1e90ff;
+}

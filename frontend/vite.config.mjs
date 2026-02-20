@@ -16,6 +16,14 @@ export default defineConfig({
     outDir: process.env.DIST_OUT_DIR || '../internal/app/api/core/frontend-dist',
     emptyOutDir: true
   },
+  css: {
+    preprocessorOptions: {
+      scss: {
+        quietDeps: true,
+        silenceDeprecations: ["import", "global-builtin", "color-functions"]
+      }
+    }
+  },
   // local dev api (proxy to avoid cors problems)
   server: {
     port: 5000,
