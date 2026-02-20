@@ -140,18 +140,18 @@ function toggleSelectAll() {
   });
 }
 
-// Розділяє адреси на IPv4 та IPv6
+// Separates addresses into IPv4 and IPv6
 const getAllAddresses = computed(() => {
   const addrs = interfaces.GetSelected.Addresses
   
   if (!addrs) return []
   
-  // Якщо це масив, з'єднуємо в строку
+  // If it's an array, join into string
   if (Array.isArray(addrs)) {
     return addrs.join(',').split(',').map(a => a.trim()).filter(Boolean)
   }
   
-  // Якщо це строка, розділяємо по комі
+  // If it's a string, split by comma
   if (typeof addrs === 'string') {
     return addrs.split(',').map(a => a.trim()).filter(Boolean)
   }
@@ -161,29 +161,29 @@ const getAllAddresses = computed(() => {
 
 const ipv4Addresses = computed(() => {
   return getAllAddresses.value.filter(addr => {
-    // IPv4 - починається з цифр
+    // IPv4 - starts with digits
     return /^\d/.test(addr)
   })
 })
 
 const ipv6Addresses = computed(() => {
   return getAllAddresses.value.filter(addr => {
-    // IPv6 - містить двокрапки
+    // IPv6 - contains colons
     return addr.includes(':')
   })
 })
 
-// Розділяє адреси піра на IPv4 та IPv6
+// Separates peer addresses into IPv4 and IPv6
 const getPeerAddresses = (addresses) => {
   if (!addresses) return { ipv4: [], ipv6: [] }
   
   let addrsArray = []
   
-  // Якщо це масив, з'єднуємо в строку
+  // If it's an array, join into string
   if (Array.isArray(addresses)) {
     addrsArray = addresses.join(',').split(',').map(a => a.trim()).filter(Boolean)
   } else if (typeof addresses === 'string') {
-    // Якщо це строка, розділяємо по комі
+    // If it's a string, split by comma
     addrsArray = addresses.split(',').map(a => a.trim()).filter(Boolean)
   }
   
@@ -192,6 +192,36 @@ const getPeerAddresses = (addresses) => {
     ipv6: addrsArray.filter(addr => addr.includes(':'))
   }
 }
+
+// Calculates visible pages for pagination (sliding window of 10 pages)
+const visiblePages = computed(() => {
+  const pages = peers.pages || []
+  const totalPages = pages.length
+  const windowSize = 10
+  
+  if (totalPages <= windowSize) {
+    // If 10 or fewer pages, show all
+    return pages
+  }
+  
+  // Sliding window of 10 pages
+  const current = peers.currentPage
+  let startPage = Math.max(1, current - Math.floor(windowSize / 2))
+  let endPage = startPage + windowSize - 1
+  
+  // If we've gone too far, shift window back
+  if (endPage > totalPages) {
+    endPage = totalPages
+    startPage = Math.max(1, endPage - windowSize + 1)
+  }
+  
+  const result = []
+  for (let i = startPage; i <= endPage; i++) {
+    result.push(i)
+  }
+  
+  return result
+})
 
 onMounted(async () => {
   await interfaces.LoadInterfaces()
@@ -204,6 +234,17 @@ onMounted(async () => {
 #peerTable thead th,
 #peerTable tbody td {
   vertical-align: middle;
+}
+
+.pagination {
+  flex-wrap: nowrap;
+  display: flex;
+}
+
+.pagination {
+  overflow-x: auto;
+  padding: 0.5rem;
+  margin: -0.5rem;
 }
 </style>
 
@@ -546,7 +587,7 @@ onMounted(async () => {
             <a class="page-link" @click="peers.previousPage">&laquo;</a>
           </li>
 
-          <li v-for="page in peers.pages" :key="page" :class="{active:peers.currentPage===page}" class="page-item">
+          <li v-for="page in visiblePages" :key="page" :class="{active:peers.currentPage===page}" class="page-item">
             <a class="page-link" @click="peers.gotoPage(page)">{{page}}</a>
           </li>
 

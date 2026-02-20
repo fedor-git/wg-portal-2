@@ -35,17 +35,17 @@ const userPeers = computed(() => {
   return users.Peers
 })
 
-// Розділяє адреси на IPv4 та IPv6 для кожного піра
+// Separates addresses into IPv4 and IPv6 for each peer
 const getPeerAddresses = (addresses) => {
   if (!addresses) return { ipv4: [], ipv6: [] }
   
   let addrsArray = []
   
-  // Якщо це масив, з'єднуємо в строку
+  // If it's an array, join into string
   if (Array.isArray(addresses)) {
     addrsArray = addresses.join(',').split(',').map(a => a.trim()).filter(Boolean)
   } else if (typeof addresses === 'string') {
-    // Якщо це строка, розділяємо по комі
+    // If it's a string, split by comma
     addrsArray = addresses.split(',').map(a => a.trim()).filter(Boolean)
   }
   
