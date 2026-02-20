@@ -74,9 +74,9 @@ const emit = defineEmits(['close'])
 const modalDialog = ref(null)
 const modalContent = ref(null)
 
-// Встановлює висоту модального вікна на основі контенту
+// Sets modal window height based on content
 const setModalHeight = async () => {
-  // Використовуємо requestAnimationFrame для синхронізації з браузером
+  // Use requestAnimationFrame to sync with browser
   return new Promise((resolve) => {
     requestAnimationFrame(() => {
       if (!modalContent.value || !modalDialog.value) {
@@ -93,20 +93,20 @@ const setModalHeight = async () => {
   })
 }
 
-// При відкритті модалі встановлює висоту
+// When modal opens, set height
 watch(() => props.visible, async (newVal) => {
   if (newVal) {
     await setModalHeight()
     
-    // ResizeObserver для спостереження за розміром
+    // ResizeObserver to watch for size changes
     const resizeObserver = new ResizeObserver(() => {
       setModalHeight()
     })
     
-    // MutationObserver для спостереження за змінами DOM (вкладки)
+    // MutationObserver to watch for DOM changes (tabs)
     const mutationObserver = new MutationObserver(() => {
-      // Чекаємо 400ms щоб дозволити анімації Bootstrap вкладок закінчитися
-      // і браузеру завершити layout recalculation
+      // Wait 400ms to allow Bootstrap tab animations to finish
+      // and browser to complete layout recalculation
       setTimeout(async () => {
         await setModalHeight()
       }, 400)
@@ -114,19 +114,19 @@ watch(() => props.visible, async (newVal) => {
     
     if (modalContent.value) {
       resizeObserver.observe(modalContent.value)
-      // Спостерігаємо за змінами класів (розкриття/закриття вкладок)
+      // Watch for class changes (tab open/close)
       mutationObserver.observe(modalContent.value, {
         attributes: true,
         subtree: true,
         attributeFilter: ['class']
       })
       
-      // Зберігаємо observers щоб їх потім очистити
+      // Store observers to clean up later
       modalContent.value.__resizeObserver = resizeObserver
       modalContent.value.__mutationObserver = mutationObserver
     }
   } else {
-    // Очищуємо observers при закритті модалі
+    // Clean up observers when modal closes
     if (modalContent.value?.__resizeObserver) {
       modalContent.value.__resizeObserver.disconnect()
     }
