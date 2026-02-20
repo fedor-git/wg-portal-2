@@ -55,6 +55,14 @@ function formatExpiryTooltip(expiresAt) {
   }
 }
 
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text).then(() => {
+    console.log('Copied to clipboard: ' + text);
+  }).catch(err => {
+    console.error('Failed to copy to clipboard:', err);
+  });
+}
+
 function calculateInterfaceName(id, name) {
   let result = id
   if (name) {
@@ -132,12 +140,72 @@ function toggleSelectAll() {
   });
 }
 
+// Розділяє адреси на IPv4 та IPv6
+const getAllAddresses = computed(() => {
+  const addrs = interfaces.GetSelected.Addresses
+  
+  if (!addrs) return []
+  
+  // Якщо це масив, з'єднуємо в строку
+  if (Array.isArray(addrs)) {
+    return addrs.join(',').split(',').map(a => a.trim()).filter(Boolean)
+  }
+  
+  // Якщо це строка, розділяємо по комі
+  if (typeof addrs === 'string') {
+    return addrs.split(',').map(a => a.trim()).filter(Boolean)
+  }
+  
+  return []
+})
+
+const ipv4Addresses = computed(() => {
+  return getAllAddresses.value.filter(addr => {
+    // IPv4 - починається з цифр
+    return /^\d/.test(addr)
+  })
+})
+
+const ipv6Addresses = computed(() => {
+  return getAllAddresses.value.filter(addr => {
+    // IPv6 - містить двокрапки
+    return addr.includes(':')
+  })
+})
+
+// Розділяє адреси піра на IPv4 та IPv6
+const getPeerAddresses = (addresses) => {
+  if (!addresses) return { ipv4: [], ipv6: [] }
+  
+  let addrsArray = []
+  
+  // Якщо це масив, з'єднуємо в строку
+  if (Array.isArray(addresses)) {
+    addrsArray = addresses.join(',').split(',').map(a => a.trim()).filter(Boolean)
+  } else if (typeof addresses === 'string') {
+    // Якщо це строка, розділяємо по комі
+    addrsArray = addresses.split(',').map(a => a.trim()).filter(Boolean)
+  }
+  
+  return {
+    ipv4: addrsArray.filter(addr => /^\d/.test(addr)),
+    ipv6: addrsArray.filter(addr => addr.includes(':'))
+  }
+}
+
 onMounted(async () => {
   await interfaces.LoadInterfaces()
   await peers.LoadPeers(undefined) // use default interface
   await peers.LoadStats(undefined) // use default interface
 })
 </script>
+
+<style scoped>
+#peerTable thead th,
+#peerTable tbody td {
+  vertical-align: middle;
+}
+</style>
 
 <template>
   <PeerViewModal :peerId="viewedPeerId" :visible="viewedPeerId!==''" @close="viewedPeerId=''"></PeerViewModal>
@@ -229,8 +297,12 @@ onMounted(async () => {
               <table class="table table-sm table-borderless device-status-table">
                 <tbody>
                 <tr>
-                  <td>{{ $t('interfaces.interface.ip') }}:</td>
-                  <td><span class="badge bg-light me-1" v-for="addr in interfaces.GetSelected.Addresses" :key="addr">{{addr}}</span></td>
+                  <td>{{ $t('interfaces.interface.ip') }} (IPv4):</td>
+                  <td><span class="badge bg-light me-1" v-for="addr in ipv4Addresses" :key="addr">{{addr}}</span></td>
+                </tr>
+                <tr>
+                  <td>{{ $t('interfaces.interface.ip') }} (IPv6):</td>
+                  <td><span class="badge bg-light me-1" v-for="addr in ipv6Addresses" :key="addr">{{addr}}</span></td>
                 </tr>
                 <tr>
                   <td>{{ $t('interfaces.interface.dns') }}:</td>
@@ -275,8 +347,12 @@ onMounted(async () => {
               <table class="table table-sm table-borderless device-status-table">
                 <tbody>
                 <tr>
-                  <td>{{ $t('interfaces.interface.ip') }}:</td>
-                  <td><span class="badge bg-light me-1" v-for="addr in interfaces.GetSelected.Addresses" :key="addr">{{addr}}</span></td>
+                  <td>{{ $t('interfaces.interface.ip') }} (IPv4):</td>
+                  <td><span class="badge bg-light me-1" v-for="addr in ipv4Addresses" :key="addr">{{addr}}</span></td>
+                </tr>
+                <tr>
+                  <td>{{ $t('interfaces.interface.ip') }} (IPv6):</td>
+                  <td><span class="badge bg-light me-1" v-for="addr in ipv6Addresses" :key="addr">{{addr}}</span></td>
                 </tr>
                 <tr>
                   <td>{{ $t('interfaces.interface.dns') }}:</td>
@@ -321,8 +397,12 @@ onMounted(async () => {
               <table class="table table-sm table-borderless device-status-table">
                 <tbody>
                 <tr>
-                  <td>{{ $t('interfaces.interface.ip') }}:</td>
-                  <td><span class="badge bg-light me-1" v-for="addr in interfaces.GetSelected.Addresses" :key="addr">{{addr}}</span></td>
+                  <td>{{ $t('interfaces.interface.ip') }} (IPv4):</td>
+                  <td><span class="badge bg-light me-1" v-for="addr in ipv4Addresses" :key="addr">{{addr}}</span></td>
+                </tr>
+                <tr>
+                  <td>{{ $t('interfaces.interface.ip') }} (IPv6):</td>
+                  <td><span class="badge bg-light me-1" v-for="addr in ipv6Addresses" :key="addr">{{addr}}</span></td>
                 </tr>
                 <tr>
                   <td>{{ $t('interfaces.interface.default-allowed-ip') }}:</td>
@@ -392,6 +472,10 @@ onMounted(async () => {
           {{ $t("interfaces.table-heading.ip") }}
           <i v-if="sortKey === 'Addresses'" :class="sortOrder === 1 ? 'asc' : 'desc'"></i>
         </th>
+        <th scope="col" @click="sortBy('ExpiresAt')">
+          Expires At
+          <i v-if="sortKey === 'ExpiresAt'" :class="sortOrder === 1 ? 'asc' : 'desc'"></i>
+        </th>
         <th v-if="interfaces.GetSelected.Mode === 'client'" scope="col">
           {{ $t("interfaces.table-heading.endpoint") }}
         </th>
@@ -407,20 +491,34 @@ onMounted(async () => {
       </thead>
       <tbody>
         <tr v-for="peer in peers.FilteredAndPaged" :key="peer.Identifier">
-          <th scope="row">
-            <input class="form-check-input" type="checkbox" v-model="peer.IsSelected">
-          </th>
+          <td class="text-center align-middle">
+            <input class="form-check-input m-0" type="checkbox" v-model="peer.IsSelected">
+          </td>
           <td class="text-center">
             <span v-if="peer.Disabled" class="text-danger" :title="$t('interfaces.peer-disabled') + ' ' + peer.DisabledReason"><i class="fa fa-circle-xmark"></i></span>
             <span v-if="!peer.Disabled && peer.ExpiresAt" class="text-warning" :title="formatExpiryTooltip(peer.ExpiresAt)"><i class="fas fa-hourglass-end expiring-peer"></i></span>
           </td>
-          <td><span v-if="peer.DisplayName" :title="peer.Identifier">{{peer.DisplayName}}</span><span v-else :title="peer.Identifier">{{ $filters.truncate(peer.Identifier, 10)}}</span></td>
-          <td>{{peer.UserIdentifier}}</td>
+          <td class="text-center"><span v-if="peer.DisplayName" :title="peer.Identifier">{{peer.DisplayName}}</span><span v-else :title="peer.Identifier">{{ $filters.truncate(peer.Identifier, 10)}}</span>
+          </td>
+          <td class="text-center"><span class="truncated-text" :title="peer.UserIdentifier">{{peer.UserIdentifier}}</span>
+            <a href="#" class="copy-btn ms-2" @click.prevent="copyToClipboard(peer.UserIdentifier)">
+              <i class="fa fa-copy"></i>
+            </a>
+          </td>
           <td>
-            <span v-for="ip in peer.Addresses" :key="ip" class="badge bg-light me-1">{{ ip }}</span>
+            <div v-if="getPeerAddresses(peer.Addresses).ipv4.length > 0">
+              <span v-for="ip in getPeerAddresses(peer.Addresses).ipv4" :key="ip" class="badge bg-light me-1">{{ ip }}</span>
+            </div>
+            <div v-if="getPeerAddresses(peer.Addresses).ipv6.length > 0">
+              <span v-for="ip in getPeerAddresses(peer.Addresses).ipv6" :key="ip" class="badge bg-light me-1">{{ ip }}</span>
+            </div>
+          </td>
+          <td class="text-center">
+            <span v-if="peer.ExpiresAt">{{ formatRFC3339ToDatetime(peer.ExpiresAt).date }} {{ formatRFC3339ToDatetime(peer.ExpiresAt).time }}</span>
+            <span v-else class="text-muted">—</span>
           </td>
           <td v-if="interfaces.GetSelected.Mode==='client'">{{peer.Endpoint.Value}}</td>
-          <td v-if="peers.hasStatistics">
+          <td v-if="peers.hasStatistics" class="text-center">
             <div v-if="peers.Statistics(peer.Identifier).IsConnected">
               <span class="badge rounded-pill bg-success" :title="$t('interfaces.peer-connected')"><i class="fa-solid fa-link"></i></span> <span :title="$t('interfaces.peer-handshake') + ' ' + peers.Statistics(peer.Identifier).LastHandshake">{{ $t('interfaces.peer-connected') }}</span>
             </div>
@@ -428,8 +526,8 @@ onMounted(async () => {
               <span class="badge rounded-pill bg-light" :title="$t('interfaces.peer-not-connected')"><i class="fa-solid fa-link-slash"></i></span>
             </div>
           </td>
-          <td v-if="peers.hasStatistics" >
-            <span class="text-center" >{{ humanFileSize(peers.Statistics(peer.Identifier).BytesReceived) }} / {{ humanFileSize(peers.Statistics(peer.Identifier).BytesTransmitted) }}</span>
+          <td v-if="peers.hasStatistics" class="text-center">
+            <span>{{ humanFileSize(peers.Statistics(peer.Identifier).BytesReceived) }} / {{ humanFileSize(peers.Statistics(peer.Identifier).BytesTransmitted) }}</span>
           </td>
           <td class="text-center">
             <a href="#" :title="$t('interfaces.button-show-peer')" @click.prevent="viewedPeerId=peer.Identifier"><i class="fas fa-eye me-2"></i></a>
@@ -474,5 +572,3 @@ onMounted(async () => {
     </div>
   </div>
 </template>
-<style>
-</style>

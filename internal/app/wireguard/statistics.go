@@ -642,14 +642,20 @@ func (c *StatisticsCollector) handlePeerIdentifierChangeEvent(oldIdentifier, new
 }
 
 func (c *StatisticsCollector) handlePeerDeleteEvent(peer domain.Peer) {
-	// NOTE: We do NOT delete peer_status from database here.
-	// The peer_status will be cleaned up by CleanOrphanedStatuses on all cluster nodes.
-	// This ensures that other nodes can detect orphaned statuses and clean up their metrics.
+	// IMMEDIATELY delete peer_status from database for instant cleanup
+	// This ensures peer data is cleaned up right away, not waiting for CleanOrphanedStatuses
+	ctx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
+	
+	if err := c.db.DeletePeerStatus(ctx, peer.Identifier); err != nil {
+		slog.Warn("failed to delete peer_status for deleted peer", "peerIdentifier", peer.Identifier, "error", err)
+	} else {
+		slog.Debug("deleted peer_status for deleted peer", "peerIdentifier", peer.Identifier)
+	}
 
 	// Remove metrics for the deleted peer on THIS node
 	c.ms.RemovePeerMetrics(&peer)
 
-	slog.Debug("cleaned up metrics for deleted peer on local node", "peerIdentifier", peer.Identifier)
+	slog.Debug("cleaned up metrics and peer_status for deleted peer on local node", "peerIdentifier", peer.Identifier)
 }
 
 // CleanOrphanedStatuses removes peer statuses and metrics for peers that no longer exist in the database.
