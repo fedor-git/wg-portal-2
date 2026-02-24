@@ -36,6 +36,7 @@ statistics:
   store_audit_data: true  # Store audit data in database (false = only log to console/file)
   listening_address: ":8787"  # Prometheus metrics endpoint address
   export_detailed_peer_metrics: false  # false = export only wireguard_peer_up; true = export handshake, bytes received/transmitted (more metrics, more load)
+  only_export_connected_peers: false  # If true, only export metrics for connected peers (reduces load with many inactive peers in database)
 
 auth:
   ldap:
