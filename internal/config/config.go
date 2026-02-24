@@ -98,6 +98,7 @@ type Config struct {
 		StoreAuditData            bool          `yaml:"store_audit_data"` // Store audit data in database
 		ListeningAddress          string        `yaml:"listening_address"`
 		ExportDetailedPeerMetrics bool          `yaml:"export_detailed_peer_metrics"`
+		OnlyExportConnectedPeers  bool          `yaml:"only_export_connected_peers"` // If true, only export metrics for connected peers
 	} `yaml:"statistics"`
 
 	Mail MailConfig `yaml:"mail"`
@@ -220,6 +221,7 @@ func defaultConfig() *Config {
 	cfg.Statistics.CollectAuditData = true
 	cfg.Statistics.ListeningAddress = ":8787"
 	cfg.Statistics.ExportDetailedPeerMetrics = true
+	cfg.Statistics.OnlyExportConnectedPeers = false
 
 	cfg.Mail = MailConfig{
 		Host:           "127.0.0.1",

@@ -168,6 +168,13 @@ func (m Manager) registerAllPeerMetricsAtStartup(ctx context.Context) error {
 		return nil // No metrics server, nothing to register
 	}
 
+	// If only_export_connected_peers is enabled, skip initial registration
+	// Metrics will be registered dynamically when peers connect
+	if m.cfg.Statistics.OnlyExportConnectedPeers {
+		slog.Info("[METRICS_STARTUP] skipping initial peer metrics registration - only_export_connected_peers enabled, metrics will be registered dynamically")
+		return nil
+	}
+
 	// Get all interfaces
 	interfaces, err := m.db.GetAllInterfaces(ctx)
 	if err != nil {
@@ -509,6 +516,12 @@ func (m Manager) ClearPeers(ctx context.Context, iface domain.InterfaceIdentifie
 
 // handlePeerStateChangeEvent handles peer connection state changes and updates TTL accordingly
 func (m Manager) handlePeerStateChangeEvent(peerStatus domain.PeerStatus, peer domain.Peer) {
+	// Skip TTL updates if delete_expired_peers is disabled
+	if !m.cfg.Core.DeleteExpiredPeers {
+		slog.Debug("skipping TTL update - delete_expired_peers is disabled", "peer", peer.Identifier)
+		return
+	}
+
 	ctx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
 
 	slog.Debug("peer state change event received", "peer", peer.Identifier, "connected", peerStatus.IsConnected)
@@ -556,6 +569,12 @@ func (m Manager) handlePeerStateChangeEvent(peerStatus domain.PeerStatus, peer d
 
 // initializePeerTTL initializes TTL for peers based on their current connection state
 func (m Manager) initializePeerTTL(ctx context.Context) {
+	// Skip TTL initialization if delete_expired_peers is disabled
+	if !m.cfg.Core.DeleteExpiredPeers {
+		slog.Debug("skipping peer TTL initialization - delete_expired_peers is disabled")
+		return
+	}
+
 	ctx = domain.SetUserInfo(ctx, domain.SystemAdminContextUserInfo())
 	slog.Debug("initializing peer TTL based on connection states")
 

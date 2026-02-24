@@ -619,6 +619,21 @@ func (c *StatisticsCollector) updatePeerMetrics(ctx context.Context, status doma
 		slog.Debug("skipping metrics update for orphaned peer", "peer", status.PeerId)
 		return
 	}
+
+	// Filter: If only_export_connected_peers is enabled, skip disconnected peers
+	if c.cfg.Statistics.OnlyExportConnectedPeers {
+		if !status.IsConnected {
+			// Peer is not connected - skip exporting its metrics
+			// Additionally, remove it from metrics if it was previously connected
+			c.ms.RemovePeerMetricsByID(string(status.PeerId))
+			return
+		} else {
+			// Peer is connected - ensure metrics are registered (dynamic registration)
+			// This allows metrics to be registered even if they weren't on startup
+			c.ms.RegisterPeerMetrics(peer)
+		}
+	}
+
 	// OPTIMIZATION: Use UpdatePeerMetricsValues instead of UpdatePeerMetrics
 	// UpdatePeerMetricsValues only updates values without removing/re-registering metrics
 	// This is called frequently (every statistics collection cycle) and should be very fast
