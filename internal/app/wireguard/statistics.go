@@ -164,8 +164,8 @@ func (c *StatisticsCollector) collectInterfaceData(ctx context.Context) {
 						i.BytesReceived = physicalInterface.BytesDownload
 						i.BytesTransmitted = physicalInterface.BytesUpload
 
-						// Update prometheus metrics
-						go c.updateInterfaceMetrics(*i)
+							// Update prometheus metrics synchronously to reduce goroutine overhead
+							c.updateInterfaceMetrics(*i)
 
 						return i, nil
 					})
@@ -243,8 +243,8 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 										p.LastHandshake = nil
 										p.UpdatedAt = time.Now()
 
-										// Update metrics to show disconnected state (metrics = 0)
-										go c.updatePeerMetrics(ctx, *p)
+										// Update metrics to show disconnected state (metrics = 0) synchronously
+										c.updatePeerMetrics(ctx, *p)
 									}
 									return p, nil
 								})
@@ -340,8 +340,8 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 							newPeerStatus = *p
 						}
 
-						// Update prometheus metrics async
-						go c.updatePeerMetrics(context.Background(), *p)
+						// Update prometheus metrics synchronously
+						c.updatePeerMetrics(context.Background(), *p)
 
 						return p, nil
 					}
@@ -550,13 +550,13 @@ func (c *StatisticsCollector) pingWorker(ctx context.Context) {
 				if wasConnected != p.IsConnected {
 					connectionStateChanged = true
 					newPeerStatus = *p // store new status for event publishing
-					slog.Info("peer connection state changed", "peer", peer.Identifier, "was", wasConnected, "now", p.IsConnected, "lastHandshake", p.LastHandshake)
-				}
+			slog.Info("peer connection state changed", "peer", peer.Identifier, "was", wasConnected, "now", p.IsConnected, "lastHandshake", p.LastHandshake)
+		}
 
-				// Update prometheus metrics async
-				go c.updatePeerMetrics(ctx, *p)
+		// Update prometheus metrics synchronously
+		c.updatePeerMetrics(ctx, *p)
 
-				return p, nil
+		return p, nil
 			})
 		if err != nil {
 			slog.Warn("failed to update peer handshake status", "peer", peer.Identifier, "error", err)
