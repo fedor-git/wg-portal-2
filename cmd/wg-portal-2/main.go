@@ -124,15 +124,20 @@ func main() {
 	internal.AssertNoError(err)
 
 	if cfg.Core.SyncOnStartup {
-		syncCtx := domain.SetUserInfo(ctx, domain.SystemAdminContextUserInfo())
-		if err := wireGuardManager.RestoreInterfaceState(syncCtx, true /*updateDbOnError*/); err != nil {
-			slog.Error("initial interface restore failed", "err", err)
-		}
-		if n, err := wireGuardManager.SyncAllPeersFromDB(syncCtx); err != nil {
-			slog.Error("initial peer sync failed", "err", err)
-		} else {
-			slog.Info("initial peer sync done", "applied", n)
-		}
+		// Run sync in background to not block web server startup
+		// This allows web interface to be available immediately while peers sync in background
+		go func() {
+			syncCtx := domain.SetUserInfo(ctx, domain.SystemAdminContextUserInfo())
+			slog.Info("starting background initial sync")
+			if err := wireGuardManager.RestoreInterfaceState(syncCtx, true /*updateDbOnError*/); err != nil {
+				slog.Error("initial interface restore failed", "err", err)
+			}
+			if n, err := wireGuardManager.SyncAllPeersFromDB(syncCtx); err != nil {
+				slog.Error("initial peer sync failed", "err", err)
+			} else {
+				slog.Info("initial peer sync done", "applied", n)
+			}
+		}()
 	}
 
 	validatorManager := validator.New()
