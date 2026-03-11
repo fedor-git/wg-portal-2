@@ -340,9 +340,6 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 							newPeerStatus = *p
 						}
 
-						// Update prometheus metrics synchronously
-						c.updatePeerMetrics(context.Background(), *p)
-
 						return p, nil
 					}
 
@@ -367,11 +364,14 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 						}
 					}
 
+					// Update metrics ONLY if connection state changed
+					// This prevents unnecessary metric updates for peers that remain in the same state
 					if connectionStateChanged {
+						c.updatePeerMetrics(ctx, newPeerStatus)
 						// Publish state change event only if this peer changed state
-						peerModel, err := c.db.GetPeer(ctx, peer.Identifier)
+						peerModel, err := c.db.GetPeer(ctx, newPeerStatus.PeerId)
 						if err != nil {
-							slog.Warn("failed to fetch peer for event", "peer", peer.Identifier, "error", err)
+							slog.Warn("failed to fetch peer for event", "peer", newPeerStatus.PeerId, "error", err)
 							continue
 						}
 						c.bus.Publish(app.TopicPeerStateChanged, newPeerStatus, *peerModel)
@@ -620,25 +620,26 @@ func (c *StatisticsCollector) updatePeerMetrics(ctx context.Context, status doma
 		return
 	}
 
-	// Filter: If only_export_connected_peers is enabled, skip disconnected peers
-	if c.cfg.Statistics.OnlyExportConnectedPeers {
-		if !status.IsConnected {
-			// Peer is not connected - skip exporting its metrics
-			// Additionally, remove it from metrics if it was previously connected
+	// CRITICAL: Always update metrics first to ensure peer_up reflects current state (0 for offline, 1 for online)
+	// This must happen before any metric removal to reflect the actual current state
+	c.ms.UpdatePeerMetricsValues(peer, status)
+
+	// Handle disconnected peers based on configuration
+	if !status.IsConnected {
+		// If only_export_connected_peers is enabled, remove metrics for disconnected peers
+		if c.cfg.Statistics.OnlyExportConnectedPeers {
 			c.ms.RemovePeerMetricsByID(string(status.PeerId))
-			return
-		} else {
-			// Peer is connected - ensure metrics are registered (dynamic registration)
-			// This allows metrics to be registered even if they weren't on startup
-			c.ms.RegisterPeerMetrics(peer)
+			slog.Debug("removed peer metrics due to disconnection", "peer", status.PeerId)
 		}
+		return
 	}
 
-	// OPTIMIZATION: Use UpdatePeerMetricsValues instead of UpdatePeerMetrics
-	// UpdatePeerMetricsValues only updates values without removing/re-registering metrics
-	// This is called frequently (every statistics collection cycle) and should be very fast
-	c.ms.UpdatePeerMetricsValues(peer, status)
+	// For connected peers: ensure metrics are registered and updated
+	// Register metrics dynamically when peer connects (for only_export_connected_peers mode)
+	c.ms.RegisterPeerMetrics(peer)
 }
+
+
 
 func (c *StatisticsCollector) connectToMessageBus() {
 	_ = c.bus.Subscribe(app.TopicPeerIdentifierUpdated, c.handlePeerIdentifierChangeEvent)
