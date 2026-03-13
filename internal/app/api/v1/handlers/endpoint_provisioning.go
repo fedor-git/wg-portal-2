@@ -256,10 +256,6 @@ func (e ProvisioningEndpoint) handleNewPeerPost() http.HandlerFunc {
 			return
 		}
 
-		if e.bus != nil {
-			e.bus.Publish("peers.updated", "provisioning:new-peer")
-		}
-
 		e.overrideAllowedIPsForAPI(r.Context(), peer)
 		respond.JSON(w, http.StatusOK, models.NewPeer(peer))
 	}

@@ -132,11 +132,6 @@ func main() {
 			if err := wireGuardManager.RestoreInterfaceState(syncCtx, true /*updateDbOnError*/); err != nil {
 				slog.Error("initial interface restore failed", "err", err)
 			}
-			if n, err := wireGuardManager.SyncAllPeersFromDB(syncCtx); err != nil {
-				slog.Error("initial peer sync failed", "err", err)
-			} else {
-				slog.Info("initial peer sync done", "applied", n)
-			}
 		}()
 	}
 

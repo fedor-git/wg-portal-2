@@ -61,8 +61,9 @@ type StatisticsEventBus interface {
 }
 
 type pingJob struct {
-	Peer    domain.Peer
-	Backend domain.InterfaceBackend
+	Peer          domain.Peer
+	PhysicalPeer  domain.PhysicalPeer  // Pre-fetched WireGuard peer data to avoid duplicate lookups
+	Backend       domain.InterfaceBackend
 }
 
 type StatisticsCollector struct {
@@ -120,10 +121,38 @@ func (c *StatisticsCollector) StartBackgroundJobs(ctx context.Context) {
 		}
 
 		slog.Info("starting background statistics jobs after startup delay")
+		// Initialize interface metrics without peers
+		c.initializeInterfaceMetrics(ctx)
 		c.startPingWorkers(ctx)
 		c.startInterfaceDataFetcher(ctx)
 		c.startPeerDataFetcher(ctx)
 	}()
+}
+
+func (c *StatisticsCollector) initializeInterfaceMetrics(ctx context.Context) {
+	if !c.cfg.Statistics.CollectPeerData {
+		return
+	}
+
+	slog.Info("initializing interface metrics at startup (no peers)")
+
+	interfaces, err := c.db.GetAllInterfaces(ctx)
+	if err != nil {
+		slog.Warn("failed to fetch interfaces for initialization", "error", err)
+		return
+	}
+
+	for _, iface := range interfaces {
+		// Register interface metrics with empty peer metrics
+		// Peer metrics will be added dynamically as peers connect
+		interfaceStatus := domain.InterfaceStatus{
+			InterfaceId: iface.Identifier,
+		}
+		c.updateInterfaceMetrics(interfaceStatus)
+		slog.Debug("initialized interface metrics", "interface", iface.Identifier)
+	}
+
+	slog.Info("interface metrics initialization complete", "count", len(interfaces))
 }
 
 func (c *StatisticsCollector) startInterfaceDataFetcher(ctx context.Context) {
@@ -189,9 +218,15 @@ func (c *StatisticsCollector) startPeerDataFetcher(ctx context.Context) {
 }
 
 func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
-	// Start ticker
 	ticker := time.NewTicker(c.cfg.Statistics.DataCollectionInterval)
 	defer ticker.Stop()
+
+	// Track only ACTIVE peers that we've seen connect at some point
+	// When peer connects: added to activeConnectedPeers
+	// When peer ages out: removed and metrics cleaned up
+	// This avoids tracking 65K peers, only the ones we care about
+	activeConnectedPeers := make(map[domain.InterfaceIdentifier]map[domain.PeerIdentifier]bool)
+	
 	for {
 		select {
 		case <-ctx.Done():
@@ -199,187 +234,255 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 		case <-ticker.C:
 			interfaces, err := c.db.GetAllInterfaces(ctx)
 			if err != nil {
-				slog.Warn("failed to fetch all interfaces for peer data collection", "error", err)
+				slog.Warn("failed to fetch interfaces", "error", err)
 				continue
 			}
 
-			for _, in := range interfaces {
-				// Get peers from WireGuard (physical interface)
-				wireguardPeers, err := c.wg.GetController(in).GetPeers(ctx, in.Identifier)
+			for _, iface := range interfaces {
+				// Initialize tracking if needed
+				if activeConnectedPeers[iface.Identifier] == nil {
+					activeConnectedPeers[iface.Identifier] = make(map[domain.PeerIdentifier]bool)
+				}
+
+				// Get peers from WireGuard kernel and filter for active ones
+				// This avoids processing thousands of configured but inactive peers
+				wgPeers, err := c.wg.GetController(iface).GetPeers(ctx, iface.Identifier)
 				if err != nil {
-					slog.Warn("failed to fetch peers for data collection", "interface", in.Identifier, "error", err)
+					slog.Warn("failed to fetch peers from WireGuard", "interface", iface.Identifier, "error", err)
 					continue
 				}
 
-				// Create map of existing WireGuard peers for quick lookup
-				wireguardPeerMap := make(map[domain.PeerIdentifier]bool)
-				for _, peer := range wireguardPeers {
-					wireguardPeerMap[peer.Identifier] = true
-				}
+				// Filter to only recently active peers (handshake within 2 minutes)
+				activePeers := c.filterActivePeers(wgPeers)
+			slog.Debug("querying WireGuard", "interface", iface.Identifier, "total_peers", len(wgPeers), "active_peers", len(activePeers))
 
-				// Get all peers from database for this interface
-				dbPeers, err := c.db.GetInterfacePeers(ctx, in.Identifier)
-				if err != nil {
-					slog.Warn("failed to fetch database peers for cleanup", "interface", in.Identifier, "error", err)
-				} else {
-					// Create map of database peers for quick lookup
-					dbPeerMap := make(map[domain.PeerIdentifier]bool)
-					for _, dbPeer := range dbPeers {
-						dbPeerMap[dbPeer.Identifier] = true
-					}
+			// Track only the active peers from this cycle (will replace old cache at end)
+			currentActivePeers := make(map[domain.PeerIdentifier]bool)
 
-					// Clean up statuses for peers that no longer exist in WireGuard
-					for _, dbPeer := range dbPeers {
-						if !wireguardPeerMap[dbPeer.Identifier] {
-							// Peer exists in DB but not in WireGuard - mark as disconnected
-							// Do NOT delete metrics, just set to 0 (peer still exists in DB)
-							err := c.db.UpdatePeerStatus(ctx, dbPeer.Identifier,
-								func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
-									if p.IsConnected || p.IsPingable {
-										slog.Debug("peer not found in wireguard, marking as disconnected",
-											"peer", dbPeer.Identifier)
-										p.IsConnected = false
-										p.IsPingable = false
-										p.LastHandshake = nil
-										p.UpdatedAt = time.Now()
+		for _, wgPeer := range activePeers {
+			currentActivePeers[wgPeer.Identifier] = true
 
-										// Update metrics to show disconnected state (metrics = 0) synchronously
-										c.updatePeerMetrics(ctx, *p)
-									}
-									return p, nil
-								})
-							if err != nil {
-								slog.Warn("failed to update disconnected peer status", "peer", dbPeer.Identifier, "error", err)
-							}
-						}
-					}
+			// Check if this is a newly connected peer (not in our active cache yet)
+			isNewConnection := !activeConnectedPeers[iface.Identifier][wgPeer.Identifier]
 
-					// Also clean up metrics for WireGuard peers that no longer exist in DB
-					// This handles the case where peer was deleted but metrics remain
-					for _, wgPeer := range wireguardPeers {
-						if !dbPeerMap[wgPeer.Identifier] {
-							slog.Debug("peer found in wireguard but not in database, removing metrics",
-								"peer", wgPeer.Identifier)
-							c.ms.RemovePeerMetricsByID(string(wgPeer.Identifier))
-						}
-					}
-				}
+			// Process this active peer
+			// Pass isNewConnection flag so we can claim ownership for new connections
+			c.updatePeerFromWireGuard(ctx, iface, wgPeer, isNewConnection)
+		}
 
-				// Process WireGuard peers
-				// OPTIMIZATION: Only update peers that are connected (handshake < 2min) or changed state
-				// Offline peers are updated only when they transition state, not on every collection cycle
-				// This prevents deadlocks from constant updates on all 100+ peers from 24 cluster nodes
-				for _, peer := range wireguardPeers {
-					var connectionStateChanged bool
-					var newPeerStatus domain.PeerStatus
+		// Detect peers that aged out (were active, now inactive)
+		// Only check peers we know have been active
+		var agedOutPeers []domain.PeerIdentifier
+		for oldPeerID := range activeConnectedPeers[iface.Identifier] {
+			if !currentActivePeers[oldPeerID] {
+				// Peer was active, now aged out (handshake > 2 min)
+				// Mark as offline to clean up metrics
+				agedOutPeers = append(agedOutPeers, oldPeerID)
+				c.markPeerDisconnected(ctx, oldPeerID)
+				// Remove from active cache
+				delete(activeConnectedPeers[iface.Identifier], oldPeerID)
+			}
+		}
 
-					// Check if peer is currently connected (recent handshake)
-					isConnected := !peer.LastHandshake.IsZero() && peer.LastHandshake.After(time.Now().Add(-2*time.Minute))
+		if len(agedOutPeers) > 0 {
+			slog.Debug("peers aged out and marked disconnected",
+				"interface", iface.Identifier,
+				"count", len(agedOutPeers))
+			if len(agedOutPeers) <= 5 {
+				slog.Debug("aged out peers detail", "peers", agedOutPeers)
+			}
+		}
 
-					var lastHandshake *time.Time
-					if !peer.LastHandshake.IsZero() {
-						lastHandshake = &peer.LastHandshake
-					}
-
-					// CRITICAL: Build update function to check if we really need to write to DB
-					updateFunc := func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
-						wasConnected := p.IsConnected
-
-						// Skip offline peers if state hasn't changed - don't write to DB
-						// This is the key optimization: offline peers write rarely
-						if !isConnected && !wasConnected {
-							// Peer remains offline - check if anything meaningful changed
-							bytesReceivedChanged := p.BytesReceived != peer.BytesUpload
-							bytesTransmittedChanged := p.BytesTransmitted != peer.BytesDownload
-							endpointChanged := p.Endpoint != peer.Endpoint
-							handshakeChanged := p.LastHandshake != lastHandshake
-
-							slog.Debug("checking offline peer changes",
-								"peer", peer.Identifier,
-								"bytes_received_changed", bytesReceivedChanged,
-								"bytes_transmitted_changed", bytesTransmittedChanged,
-								"endpoint_changed", endpointChanged,
-								"handshake_changed", handshakeChanged)
-
-							if !bytesReceivedChanged && !bytesTransmittedChanged && !endpointChanged && !handshakeChanged {
-								// Nothing changed for offline peer - return without modifying
-								slog.Debug("peer remains offline, skipping DB update", "peer", peer.Identifier, "lastHandshake", lastHandshake)
-								return p, nil
-							}
-						}
-
-						// For connected peers or state transitions: update the record
-						slog.Debug("updating peer status in database",
-							"peer", peer.Identifier,
-							"was_connected", wasConnected,
-							"is_connected_now", isConnected,
-							"last_handshake_old", p.LastHandshake,
-							"last_handshake_new", lastHandshake)
-
-						p.UpdatedAt = time.Now()
-						p.LastSessionStart = getSessionStartTime(*p, peer.BytesUpload, peer.BytesDownload, lastHandshake)
-						p.BytesReceived = peer.BytesUpload
-						p.BytesTransmitted = peer.BytesDownload
-						p.Endpoint = peer.Endpoint
-						p.LastHandshake = lastHandshake
-
-						// CRITICAL FIX: When ping checks are disabled, force IsPingable=false
-						// This ensures CalcConnected() uses ONLY handshake-based logic
-						// Without this, old IsPingable=true would keep peer ONLINE despite old handshake
-						if !c.cfg.Statistics.UsePingChecks {
-							p.IsPingable = false
-							slog.Debug("ping disabled, setting IsPingable=false", "peer", peer.Identifier)
-						}
-
-						p.CalcConnected()
-
-						// Log state transitions
-						if wasConnected != p.IsConnected {
-							slog.Info("peer connection state changed", "peer", peer.Identifier, "was_connected", wasConnected, "now_connected", p.IsConnected, "lastHandshake", lastHandshake)
-							connectionStateChanged = true
-							newPeerStatus = *p
-						}
-
-						return p, nil
-					}
-
-					// Update strategy:
-					// - Connected peers: claim ownership via ClaimPeerStatus (only one node owns it)
-					// - Offline peers: just update via UpdatePeerStatus (rare writes due to no-change early return)
-					var err error
-					if isConnected {
-						// This node should manage connected peer - claim ownership
-						slog.Info("claiming connected peer", "peer", peer.Identifier, "node_id", c.cfg.Core.ClusterNodeId)
-						err = c.db.ClaimPeerStatus(ctx, peer.Identifier, c.cfg.Core.ClusterNodeId, updateFunc)
-						if err != nil {
-							slog.Warn("failed to claim connected peer", "peer", peer.Identifier, "error", err)
-						} else {
-							slog.Debug("claimed connected peer", "peer", peer.Identifier)
-						}
-					} else {
-						// Offline peer - update only if state changed (via updateFunc early-return optimization)
-						err = c.db.UpdatePeerStatus(ctx, peer.Identifier, updateFunc)
-						if err != nil {
-							slog.Warn("failed to update offline peer", "peer", peer.Identifier, "error", err)
-						}
-					}
-
-					// Update metrics ONLY if connection state changed
-					// This prevents unnecessary metric updates for peers that remain in the same state
-					if connectionStateChanged {
-						c.updatePeerMetrics(ctx, newPeerStatus)
-						// Publish state change event only if this peer changed state
-						peerModel, err := c.db.GetPeer(ctx, newPeerStatus.PeerId)
-						if err != nil {
-							slog.Warn("failed to fetch peer for event", "peer", newPeerStatus.PeerId, "error", err)
-							continue
-						}
-						c.bus.Publish(app.TopicPeerStateChanged, newPeerStatus, *peerModel)
-					}
-				}
+		// Update cache with currently active peers
+		// These are the only peers we need to track for cleanup next cycle
+		activeConnectedPeers[iface.Identifier] = currentActivePeers
 			}
 		}
 	}
+}
+
+func (c *StatisticsCollector) updatePeerFromWireGuard(ctx context.Context, iface domain.Interface, wgPeer domain.PhysicalPeer, isNewConnection bool) {
+	// Get DB peer info to store state
+	dbPeer, err := c.db.GetPeer(ctx, wgPeer.Identifier)
+	if err != nil || dbPeer == nil {
+		slog.Debug("peer in WG but not in DB, skipping", "peer", wgPeer.Identifier)
+		return
+	}
+
+	var stateChanged bool
+	var newStatus domain.PeerStatus
+	var lastStatus domain.PeerStatus
+
+	var lastHandshake *time.Time
+	if !wgPeer.LastHandshake.IsZero() {
+		lastHandshake = &wgPeer.LastHandshake
+	}
+
+	// For newly connected peers, claim ownership to ensure this node manages their state
+	// This prevents other nodes from overwriting our connection state
+	// For existing peers in our cache, use regular update
+	if isNewConnection {
+		// NEW CONNECTION: Use ClaimPeerStatus to gain ownership
+		err = c.db.ClaimPeerStatus(ctx, wgPeer.Identifier, c.cfg.Core.ClusterNodeId,
+			func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
+				wasConnected := p.IsConnected
+
+				// Update with latest WireGuard data
+				p.UpdatedAt = time.Now()
+				p.LastHandshake = lastHandshake
+				p.Endpoint = wgPeer.Endpoint
+				p.BytesReceived = wgPeer.BytesUpload
+				p.BytesTransmitted = wgPeer.BytesDownload
+				p.LastSessionStart = getSessionStartTime(*p, wgPeer.BytesUpload, wgPeer.BytesDownload, lastHandshake)
+
+				slog.Debug("claiming new peer connection",
+					"peer", wgPeer.Identifier,
+					"node", c.cfg.Core.ClusterNodeId,
+					"bytes_received", p.BytesReceived,
+					"bytes_transmitted", p.BytesTransmitted)
+
+				// Force IsPingable=false if ping checks disabled
+				if !c.cfg.Statistics.UsePingChecks {
+					p.IsPingable = false
+				}
+
+				p.CalcConnected()
+
+				// Detect state change
+				if wasConnected != p.IsConnected {
+					slog.Debug("peer state changed (new connection)",
+						"peer", wgPeer.Identifier,
+						"was_connected", wasConnected,
+						"now_connected", p.IsConnected)
+					stateChanged = true
+					newStatus = *p
+				}
+
+				// Capture current status for metrics update
+				lastStatus = *p
+				return p, nil
+			})
+	} else {
+		// EXISTING CONNECTION: Use UpdatePeerStatus for regular updates
+		err = c.db.UpdatePeerStatus(ctx, wgPeer.Identifier,
+			func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
+				wasConnected := p.IsConnected
+
+				// Update with latest WireGuard data
+				p.UpdatedAt = time.Now()
+				p.LastHandshake = lastHandshake
+				p.Endpoint = wgPeer.Endpoint
+				p.BytesReceived = wgPeer.BytesUpload
+				p.BytesTransmitted = wgPeer.BytesDownload
+				p.LastSessionStart = getSessionStartTime(*p, wgPeer.BytesUpload, wgPeer.BytesDownload, lastHandshake)
+
+				slog.Debug("updating peer status from WireGuard",
+					"peer", wgPeer.Identifier,
+					"bytes_received", p.BytesReceived,
+					"bytes_transmitted", p.BytesTransmitted,
+					"endpoint", p.Endpoint,
+					"last_handshake", p.LastHandshake)
+
+				// Force IsPingable=false if ping checks disabled
+				if !c.cfg.Statistics.UsePingChecks {
+					p.IsPingable = false
+				}
+
+				p.CalcConnected()
+
+				// Detect state change
+				if wasConnected != p.IsConnected {
+					slog.Debug("peer state changed",
+						"peer", wgPeer.Identifier,
+						"was_connected", wasConnected,
+						"now_connected", p.IsConnected)
+					stateChanged = true
+					newStatus = *p
+				}
+
+				// Capture current status for metrics update
+				lastStatus = *p
+				return p, nil
+			})
+	}
+
+	if err != nil {
+		slog.Warn("failed to update peer status", "peer", wgPeer.Identifier, "error", err)
+		return
+	}
+
+	// Update metrics:
+	// - For connected peers: update every cycle to keep metrics fresh (bytes, handshake, etc.)
+	// - For disconnected peers: only update if state changed (to remove expensive RemovePeerMetricsById calls)
+	if lastStatus.IsConnected {
+		// Connected peer - update metrics every cycle to keep data fresh
+		// Pass stateChanged=true to ensure metrics are registered on reconnect
+		c.updatePeerMetrics(ctx, lastStatus, stateChanged)
+	} else if stateChanged {
+		// Disconnected peer - only update metrics if state changed (was connected, now disconnected)
+		c.updatePeerMetrics(ctx, lastStatus, true)
+	}
+
+	// Only publish state change event if connection state changed
+	if stateChanged {
+		c.bus.Publish(app.TopicPeerStateChanged, newStatus, *dbPeer)
+	}
+}
+
+func (c *StatisticsCollector) markPeerDisconnected(ctx context.Context, peerID domain.PeerIdentifier) {
+	err := c.db.UpdatePeerStatus(ctx, peerID,
+		func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
+			// Set peer as disconnected regardless of current state
+			// We need to clean up metrics even if peer is already marked false
+			// because metrics might still be registered
+			wasConnected := p.IsConnected || p.IsPingable
+			
+			if wasConnected {
+				slog.Info("marking peer as disconnected", "peer", peerID, "was_connected", p.IsConnected, "was_pingable", p.IsPingable)
+			}
+			
+			p.IsConnected = false
+			p.IsPingable = false
+			p.LastHandshake = nil
+			p.UpdatedAt = time.Now()
+			
+			// Always call updatePeerMetrics to clean up metrics
+			// Pass true to indicate state change (from possibly connected to disconnected)
+			c.updatePeerMetrics(ctx, *p, true)
+			
+			return p, nil
+		})
+
+	if err != nil {
+		slog.Warn("failed to mark peer disconnected", "peer", peerID, "error", err)
+	}
+}
+
+// filterActivePeers returns only peers that had a handshake within the last 2 minutes.
+// This optimization avoids processing thousands of configured but inactive peers.
+// Used by statistics collector to reduce CPU load when many peers are configured but few are active.
+func (c *StatisticsCollector) filterActivePeers(allPeers []domain.PhysicalPeer) []domain.PhysicalPeer {
+	if len(allPeers) == 0 {
+		return allPeers
+	}
+
+	now := time.Now()
+	twoMinutesAgo := now.Add(-2 * time.Minute)
+
+	activePeers := make([]domain.PhysicalPeer, 0, len(allPeers))
+
+	for _, peer := range allPeers {
+		// Keep peer ONLY if handshake is within 2 minutes
+		// LastHandshake is the only reliable indicator of active connection
+		// (BytesUpload/BytesDownload are cumulative and never reset)
+		if !peer.LastHandshake.IsZero() && peer.LastHandshake.After(twoMinutesAgo) {
+			activePeers = append(activePeers, peer)
+		}
+		// Peers with handshake > 2 minutes are considered aged out (inactive)
+		// No need to log here - aged out peers are logged in markPeerDisconnected()
+	}
+
+	return activePeers
 }
 
 func getSessionStartTime(
@@ -412,6 +515,7 @@ func getSessionStartTime(
 		return oldStats.LastSessionStart
 	}
 }
+
 
 func (c *StatisticsCollector) startPingWorkers(ctx context.Context) {
 	if !c.cfg.Statistics.UsePingChecks {
@@ -475,15 +579,25 @@ func (c *StatisticsCollector) enqueuePingChecks(ctx context.Context) {
 			}
 
 			for _, in := range interfaces {
-				peers, err := c.db.GetInterfacePeers(ctx, in.Identifier)
+				// OPTIMIZATION: Query WireGuard directly - source of truth for active peers on THIS node
+				wireguardPeers, err := c.wg.GetController(in).GetPeers(ctx, in.Identifier)
 				if err != nil {
-					slog.Warn("failed to fetch peers for ping checks", "interface", in.Identifier, "error", err)
+					slog.Warn("failed to fetch WireGuard peers for ping checks", "interface", in.Identifier, "error", err)
 					continue
 				}
-				for _, peer := range peers {
+
+				for _, physicalPeer := range wireguardPeers {
+					// Get the DB peer info
+					dbPeer, err := c.db.GetPeer(ctx, physicalPeer.Identifier)
+					if err != nil || dbPeer == nil {
+						slog.Debug("failed to fetch peer from DB for ping check", "peer", physicalPeer.Identifier, "error", err)
+						continue
+					}
+
 					c.pingJobs <- pingJob{
-						Peer:    peer,
-						Backend: in.Backend,
+						Peer:         *dbPeer,
+						PhysicalPeer: physicalPeer,
+						Backend:      in.Backend,
 					}
 				}
 			}
@@ -493,90 +607,64 @@ func (c *StatisticsCollector) enqueuePingChecks(ctx context.Context) {
 
 func (c *StatisticsCollector) pingWorker(ctx context.Context) {
 	defer c.pingWaitGroup.Done()
-	slog.Info("ping worker started", "node_id", c.cfg.Core.ClusterNodeId)
+	slog.Debug("ping worker started", "node_id", c.cfg.Core.ClusterNodeId)
 	for job := range c.pingJobs {
-		peer := job.Peer
-		backend := job.Backend
+		physicalPeer := job.PhysicalPeer
 
-		var connectionStateChanged bool
-		var newPeerStatus domain.PeerStatus
+		var stateChanged bool
+		var newStatus domain.PeerStatus
 
-		slog.Info("processing peer status check", "peer", peer.Identifier, "interface", peer.InterfaceIdentifier)
+		slog.Debug("processing peer from WireGuard", "peer", physicalPeer.Identifier)
 
-		// OPTIMIZATION: Use WireGuard kernel LastHandshakeTime instead of ICMP ping checks
-		// This is more reliable (real activity) and has zero CPU overhead
-		// Get all physical peers from WireGuard kernel to extract LastHandshake timestamp
-		physicalPeers, err := c.wg.GetControllerByName(backend).GetPeers(ctx, peer.InterfaceIdentifier)
-		if err != nil {
-			slog.Warn("failed to get physical peers for last handshake check", "interface", peer.InterfaceIdentifier, "error", err)
-			// If we can't get peer data, skip status update
-			continue
-		}
-
-		// Find the matching peer by identifier
-		var physicalPeer *domain.PhysicalPeer
-		for i := range physicalPeers {
-			if physicalPeers[i].Identifier == peer.Identifier {
-				physicalPeer = &physicalPeers[i]
-				break
-			}
-		}
-
-		if physicalPeer == nil {
-			slog.Warn("peer not found in WireGuard kernel", "peer", peer.Identifier, "interface", peer.InterfaceIdentifier)
-			// If peer not in kernel, skip status update
-			continue
-		}
-
-		slog.Info("found peer in WireGuard", "peer", peer.Identifier, "lastHandshake", physicalPeer.LastHandshake)
-
-		// Update peer status based on WireGuard LastHandshakeTime (not ping)
-		err = c.db.UpdatePeerStatus(ctx, peer.Identifier,
+		// Update peer status based on WireGuard data
+		err := c.db.UpdatePeerStatus(ctx, physicalPeer.Identifier,
 			func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
 				wasConnected := p.IsConnected
 
-				// Use WireGuard LastHandshakeTime to determine connectivity
-				// This is more reliable than ICMP ping and has zero CPU cost
-				p.LastHandshake = &physicalPeer.LastHandshake
+				// Use WireGuard data directly
+				var lastHandshake *time.Time
+				if !physicalPeer.LastHandshake.IsZero() {
+					lastHandshake = &physicalPeer.LastHandshake
+				}
+
+				p.LastHandshake = lastHandshake
 				p.Endpoint = physicalPeer.Endpoint
 				p.BytesReceived = physicalPeer.BytesUpload
 				p.BytesTransmitted = physicalPeer.BytesDownload
 				p.UpdatedAt = time.Now()
 
-				// Calculate connected state based on LastHandshake (built-in logic)
-				// If HandshakeTime < 2 minutes = connected
+				// Calculate connected state based on LastHandshake
 				p.CalcConnected()
 
 				if wasConnected != p.IsConnected {
-					connectionStateChanged = true
-					newPeerStatus = *p // store new status for event publishing
-			slog.Info("peer connection state changed", "peer", peer.Identifier, "was", wasConnected, "now", p.IsConnected, "lastHandshake", p.LastHandshake)
-		}
+					slog.Debug("peer connection state changed",
+						"peer", physicalPeer.Identifier,
+						"was", wasConnected,
+						"now", p.IsConnected)
+					stateChanged = true
+					newStatus = *p
+				}
 
-		// Update prometheus metrics synchronously
-		c.updatePeerMetrics(ctx, *p)
+				// Update metrics
+				c.updatePeerMetrics(ctx, *p, stateChanged)
 
-		return p, nil
+				return p, nil
 			})
+
 		if err != nil {
-			slog.Warn("failed to update peer handshake status", "peer", peer.Identifier, "error", err)
-		} else {
-			isNowConnected := physicalPeer.LastHandshake.After(time.Now().Add(-2 * time.Minute))
-			slog.Info("updated peer status from WireGuard", "peer", peer.Identifier, "lastHandshake", physicalPeer.LastHandshake, "now_connected", isNowConnected)
+			slog.Warn("failed to update peer status", "peer", physicalPeer.Identifier, "error", err)
 		}
 
-		if connectionStateChanged {
-			// publish event if connection state changed
-			c.bus.Publish(app.TopicPeerStateChanged, newPeerStatus, peer)
+		if stateChanged {
+			// Publish event if connection state changed
+			c.bus.Publish(app.TopicPeerStateChanged, newStatus, job.Peer)
 		}
 
-		// Add delay between updates to reduce concurrent database operations
-		// Even though we removed ping checks (zero wait), keep this delay to avoid connection pool exhaustion
-		// 10ms per peer × workers = minimal delay while preventing database overload
+		// Minimal delay
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(10 * time.Millisecond):
+		case <-time.After(1 * time.Millisecond):
 		}
 	}
 }
@@ -608,7 +696,7 @@ func (c *StatisticsCollector) updateInterfaceMetrics(status domain.InterfaceStat
 	c.ms.UpdateInterfaceMetrics(status)
 }
 
-func (c *StatisticsCollector) updatePeerMetrics(ctx context.Context, status domain.PeerStatus) {
+func (c *StatisticsCollector) updatePeerMetrics(ctx context.Context, status domain.PeerStatus, stateChanged bool) {
 	// Fetch peer data from the database
 	peer, err := c.db.GetPeer(ctx, status.PeerId)
 	if err != nil {
@@ -623,13 +711,21 @@ func (c *StatisticsCollector) updatePeerMetrics(ctx context.Context, status doma
 	// CRITICAL: Always update metrics first to ensure peer_up reflects current state (0 for offline, 1 for online)
 	// This must happen before any metric removal to reflect the actual current state
 	c.ms.UpdatePeerMetricsValues(peer, status)
+	slog.Debug("updated peer metrics values", "peer", status.PeerId, "is_connected", status.IsConnected, "state_changed", stateChanged)
 
 	// Handle disconnected peers based on configuration
 	if !status.IsConnected {
-		// If only_export_connected_peers is enabled, remove metrics for disconnected peers
-		if c.cfg.Statistics.OnlyExportConnectedPeers {
+		// If state changed (was connected, now disconnected) and only_export_connected_peers is enabled,
+		// ONLY THEN remove metrics for disconnected peers.
+		// This avoids expensive RemovePeerMetricsByID calls on every cycle for thousands of offline peers.
+		slog.Debug("peer disconnected, checking metric removal",
+			"peer", status.PeerId,
+			"state_changed", stateChanged,
+			"only_export_connected", c.cfg.Statistics.OnlyExportConnectedPeers)
+		
+		if stateChanged && c.cfg.Statistics.OnlyExportConnectedPeers {
 			c.ms.RemovePeerMetricsByID(string(status.PeerId))
-			slog.Debug("removed peer metrics due to disconnection", "peer", status.PeerId)
+			slog.Info("removed peer metrics due to disconnection", "peer", status.PeerId)
 		}
 		return
 	}
@@ -637,6 +733,7 @@ func (c *StatisticsCollector) updatePeerMetrics(ctx context.Context, status doma
 	// For connected peers: ensure metrics are registered and updated
 	// Register metrics dynamically when peer connects (for only_export_connected_peers mode)
 	c.ms.RegisterPeerMetrics(peer)
+	slog.Debug("registered metrics for connected peer", "peer", status.PeerId)
 }
 
 

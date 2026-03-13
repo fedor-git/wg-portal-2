@@ -1193,25 +1193,49 @@ func (r *SqlRepo) UpdatePeerStatus(
 				return err // return any error will roll back
 			}
 
-			// OWNERSHIP CHECK: Only skip if peer is CONNECTED and owned by another node
-			// Allow updates for:
-			// 1. Peers not owned by anyone (OwnerNodeId = "")
-			// 2. Peers owned by us (OwnerNodeId == our node)
-			// 3. OFFLINE peers even if owned by another node (they may be transitioning offline)
-			//
-			// Skip only if:
-			// - Peer is CONNECTED AND owned by another node
-			if in.IsConnected && in.OwnerNodeId != "" && in.OwnerNodeId != r.cfg.Core.ClusterNodeId {
-				// Peer is CONNECTED and managed by another node - skip to prevent conflicts
-				slog.Debug("peer status owned by other node and is connected, skipping update",
-					"peer", id, "owner", in.OwnerNodeId, "our_node", r.cfg.Core.ClusterNodeId)
-				return nil
-			}
+			// Save original state to restore conflicting fields if peer is owned by another node
+			oldIsConnected := in.IsConnected
+			oldIsPingable := in.IsPingable
+			oldOwnerNodeId := in.OwnerNodeId
 
-			// Allow update to proceed - call updateFunc
+			// IMPORTANT: Always allow updateFunc to proceed!
+			// This ensures non-conflicting data (BytesReceived, BytesTransmitted, LastHandshake, Endpoint)
+			// is captured for ALL nodes, not just the owner.
+			// We'll selectively restore conflicting fields below if owned by another node.
 			in, err = updateFunc(in)
 			if err != nil {
 				return err
+			}
+
+			// OWNERSHIP CHECK: If peer is CONNECTED and owned by another node,
+			// restore the conflicting state fields to prevent this node from overwriting owner's state
+			// BUT keep non-conflicting data like bytes and endpoint
+			if oldIsConnected && oldOwnerNodeId != "" && oldOwnerNodeId != r.cfg.Core.ClusterNodeId {
+				slog.Info("peer status owned by other node, restoring conflicting fields but KEEPING bytes",
+					"peer", id, 
+					"owner", oldOwnerNodeId, 
+					"our_node", r.cfg.Core.ClusterNodeId,
+					"restored_is_connected", oldIsConnected,
+					"bytes_received", in.BytesReceived, 
+					"bytes_transmitted", in.BytesTransmitted,
+					"last_handshake", in.LastHandshake,
+					"endpoint", in.Endpoint)
+				// Restore conflicting fields to prevent state conflicts
+				in.IsConnected = oldIsConnected
+				in.IsPingable = oldIsPingable
+				in.OwnerNodeId = oldOwnerNodeId
+				// Keep the non-conflicting data:
+				// - BytesReceived, BytesTransmitted (traffic data)
+				// - LastHandshake, Endpoint (connection details)
+				// - LastSessionStart, LastPing (timestamps)
+			} else {
+				// Peer is either offline or not owned by another node - safe to save all data
+				slog.Debug("peer status update - saving all data",
+					"peer", id,
+					"is_connected", in.IsConnected,
+					"owned_by", in.OwnerNodeId,
+					"bytes_received", in.BytesReceived,
+					"bytes_transmitted", in.BytesTransmitted)
 			}
 
 			// CRITICAL: When peer transitions to OFFLINE, clear its ownership
