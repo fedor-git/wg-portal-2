@@ -98,38 +98,14 @@ func NewWireGuardManager(
 // Event-driven sync (via TopicPeerCreatedSync, TopicPeerUpdatedSync, TopicPeerDeletedSync)
 // handles peer synchronization across nodes - NO periodic full syncs needed.
 func (m Manager) StartBackgroundJobs(ctx context.Context) {
-	// On startup: load all peers from database locally (non-distributed, no lock)
-	// This ensures local WireGuard is populated before fanout starts syncing
-	if m.db != nil {
-		// Create admin context with NoFanout flag for startup loading
-		// - Admin rights allow DB access during startup
-		// - NoFanout prevents interface update events from triggering fanout cascade
-		adminCtx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
-		adminCtx = app.WithNoFanout(adminCtx)
-
-		count, err := m.db.SyncAllPeersFromDB(adminCtx)
-		if err != nil {
-			slog.Error("[WIREGUARD] startup peer load failed", "error", err)
-		} else {
-			slog.Info("[WIREGUARD] startup peer load completed", "peers", count)
-		}
-
-		// OPTIMIZATION: Register metrics for all loaded peers on startup (ONCE)
-		// This initialization happens only once, then statistics collection only updates values
-		// Without this: metrics would re-register every few seconds (expensive CPU usage)
-		if count > 0 && m.statsCollector != nil && m.statsCollector.ms != nil {
-			if err := m.registerAllPeerMetricsAtStartup(adminCtx); err != nil {
-				slog.Warn("[WIREGUARD] failed to register peer metrics on startup", "error", err)
-			}
-		}
-
-		// Signal that startup peer loading is complete
-		// This unblocks fanout from sending events during startup
-		close(m.startupComplete)
-	}
-
-	// Start expiry check loop moved to StartExpiredPeersCheckAfterServer()
-	// This ensures we only delete expired peers AFTER the web server is fully initialized
+	// Peer loading on startup is now handled by RestoreInterfaceState in main.go (if SyncOnStartup enabled)
+	// This function just signals completion to unblock fanout events
+	
+	// Metrics registration will be handled by statistics collector initialization (10 sec delay)
+	// or can be added explicitly here if needed for immediate metric availability
+	
+	// Signal that manager is ready - this unblocks fanout from sending events
+	close(m.startupComplete)
 }
 
 // Periodic full sync completely removed:
@@ -831,12 +807,6 @@ func (m Manager) handlePeerCreatedSyncEvent(peerID domain.PeerIdentifier) {
 		"peer_id", peerID,
 		"interface", peer.InterfaceIdentifier,
 		"save_peer_ms", savePeerDuration.Milliseconds())
-
-	// OPTIMIZATION: Register peer metrics once when peer is first created
-	// This happens once per peer, not on every statistics collection cycle
-	if m.statsCollector != nil && m.statsCollector.ms != nil {
-		m.statsCollector.ms.RegisterPeerMetrics(peer)
-	}
 
 	totalDuration := time.Since(startProcessTime)
 	slog.Info("[PEER_SYNC] successfully added peer to WireGuard - COMPLETED",

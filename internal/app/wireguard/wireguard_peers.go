@@ -570,7 +570,7 @@ func (m Manager) DeletePeer(ctx context.Context, id domain.PeerIdentifier) error
 	// Update routes after peers have changed
 	m.bus.Publish(app.TopicRouteUpdate, "peers updated")
 	// Update interface after peers have changed
-	m.bus.Publish(app.TopicPeerInterfaceUpdated, peer.InterfaceIdentifier)
+	// m.bus.Publish(app.TopicPeerInterfaceUpdated, peer.InterfaceIdentifier)
 
 	return nil
 }
@@ -664,9 +664,11 @@ func (m Manager) savePeers(ctx context.Context, peers ...*domain.Peer) error {
 		m.bus.Publish(app.TopicRouteUpdate, "peers updated")
 	}
 
-	for iface := range interfaces {
-		m.bus.Publish(app.TopicPeerInterfaceUpdated, iface)
-	}
+	// NOTE: Do NOT publish TopicPeerInterfaceUpdated here
+	// Individual peer saves should NOT trigger full interface resync
+	// - For new peers: TopicPeerCreatedSync (single-peer event) handles sync via handlePeerCreatedSyncEvent()
+	// - For peer updates: Individual peer updates don't require interface-wide resync
+	// - TopicPeerInterfaceUpdated should only be published for interface config changes (address, enabled state, etc)
 
 	return nil
 }

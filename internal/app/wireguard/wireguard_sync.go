@@ -81,15 +81,21 @@ func (m Manager) SyncAllPeersFromDB(ctx context.Context) (int, error) {
 			}
 		}
 
-		// Add or update peers
+		// Add or update peers - batch collect all peers to update
+		peersToUpdate := make([]domain.Peer, 0, len(newPeerMap))
 		for id, peer := range newPeerMap {
 			if existingPeer, exists := existingPeerMap[id]; !exists || !existingPeer.Equals(peer) {
-				if err := m.wg.SavePeer(ctx, string(in.Identifier), &peer); err != nil {
-					slog.ErrorContext(ctx, "failed to save peer", "peer", id, "iface", in.Identifier, "err", err)
-					continue
-				}
-				applied++
+				peersToUpdate = append(peersToUpdate, peer)
 			}
+		}
+
+		// Apply all peers as batch to reduce syscalls (especially on startup)
+		if len(peersToUpdate) > 0 {
+			slog.Debug("syncing peers batch", "iface", in.Identifier, "count", len(peersToUpdate))
+			if err := m.applyPeers(ctx, peersToUpdate); err != nil {
+				slog.ErrorContext(ctx, "failed to apply peers batch", "iface", in.Identifier, "count", len(peersToUpdate), "err", err)
+			}
+			applied += len(peersToUpdate)
 		}
 	}
 
@@ -123,24 +129,35 @@ func (m Manager) clearPeers(ctx context.Context, iface domain.InterfaceIdentifie
 }
 
 func (m Manager) applyPeers(ctx context.Context, peers []domain.Peer) error {
-	var firstErr error
+	if len(peers) == 0 {
+		return nil
+	}
+
+	// Filter out disabled peers first
+	enabledPeers := make([]*domain.Peer, 0, len(peers))
 	for i := range peers {
-		p := &peers[i]
-		if p.IsDisabled() {
-			continue
-		}
-		if err := m.savePeers(ctx, p); err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("apply peer %s (iface %s): %w",
-					p.Identifier, p.InterfaceIdentifier, err)
-			}
-			continue
-		}
-		if !app.NoFanout(ctx) && m.bus != nil {
-			m.bus.Publish(app.TopicPeerUpdated, struct{}{})
+		if !peers[i].IsDisabled() {
+			enabledPeers = append(enabledPeers, &peers[i])
 		}
 	}
-	return firstErr
+
+	if len(enabledPeers) == 0 {
+		return nil
+	}
+
+	// Apply ALL peers in a single batch call instead of one-by-one
+	// This significantly reduces syscalls during startup
+	slog.Debug("applying peers batch", "count", len(enabledPeers))
+	if err := m.savePeers(ctx, enabledPeers...); err != nil {
+		return fmt.Errorf("apply peers batch failed (count %d): %w", len(enabledPeers), err)
+	}
+
+	if !app.NoFanout(ctx) && m.bus != nil {
+		// Publish single event for entire batch instead of one per peer
+		m.bus.Publish(app.TopicPeerUpdated, struct{}{})
+	}
+
+	return nil
 }
 
 func isNoSuchFile(err error) bool {
