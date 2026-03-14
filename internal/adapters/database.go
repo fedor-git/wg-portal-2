@@ -1691,7 +1691,7 @@ func (r *SqlRepo) DeletePeersByIDs(ctx context.Context, peerIDs []string) (int64
 	}
 
 	// Second: delete peer statuses to avoid orphaned status records
-	if err := tx.Where("peer_id IN ?", peerIDs).Delete(&domain.PeerStatus{}).Error; err != nil {
+	if err := tx.Where("identifier IN ?", peerIDs).Delete(&domain.PeerStatus{}).Error; err != nil {
 		tx.Rollback()
 		return 0, err
 	}
