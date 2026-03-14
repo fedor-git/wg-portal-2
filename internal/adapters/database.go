@@ -386,6 +386,17 @@ func (r *SqlRepo) migrate() error {
 		r.db.Migrator().DropColumn("peer_statuses", "previous_session_transmitted")
 	}
 
+	// Clean up accumulated traffic columns (no longer needed - use current session traffic only)
+	// Simplified to keep only current session bytes which are accurate from WireGuard
+	if r.db.Migrator().HasColumn("peer_statuses", "accumulated_received") {
+		slog.Debug("dropping deprecated column", "table", "peer_statuses", "column", "accumulated_received")
+		r.db.Migrator().DropColumn("peer_statuses", "accumulated_received")
+	}
+	if r.db.Migrator().HasColumn("peer_statuses", "accumulated_transmitted") {
+		slog.Debug("dropping deprecated column", "table", "peer_statuses", "column", "accumulated_transmitted")
+		r.db.Migrator().DropColumn("peer_statuses", "accumulated_transmitted")
+	}
+
 	existingSysStat := SysStat{}
 	r.db.Where("schema_version = ?", SchemaVersion).First(&existingSysStat)
 	if existingSysStat.SchemaVersion == 0 {

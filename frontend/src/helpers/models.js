@@ -169,8 +169,6 @@ export function freshStats() {
     LastSessionStart: null,
     BytesTransmitted: 0,
     BytesReceived: 0,
-    AccumulatedBytesTransmitted: 0,
-    AccumulatedBytesReceived: 0,
     EndpointAddress: ""
   }
 }

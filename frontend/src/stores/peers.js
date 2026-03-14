@@ -8,22 +8,14 @@ import { ipToBigInt } from '@/helpers/utils';
 
 const baseUrl = `/peer`
 
-// Helper function to calculate total traffic (accumulated + current session)
-// Falls back to current session if accumulated is null
+// Helper function to get traffic (current session traffic from WireGuard)
+// Returns bytes received or transmitted for current session
 export const getTotalTraffic = (stat, isReceived = true) => {
   if (!stat) {
     return 0
   }
   
-  const accumulated = isReceived ? stat.AccumulatedBytesReceived : stat.AccumulatedBytesTransmitted
-  const current = isReceived ? stat.BytesReceived : stat.BytesTransmitted
-  
-  // If accumulated exists, add current to it; otherwise just use current
-  if (accumulated !== null && accumulated !== undefined) {
-    return (accumulated || 0) + (current || 0)
-  }
-  // Fallback: if accumulated is null, just show current session traffic
-  return (current || 0)
+  return isReceived ? (stat.BytesReceived || 0) : (stat.BytesTransmitted || 0)
 }
 
 export const peerStore = defineStore('peers', {
