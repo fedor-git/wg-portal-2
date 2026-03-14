@@ -327,19 +327,34 @@ func (c *StatisticsCollector) updatePeerFromWireGuard(ctx context.Context, iface
 			func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
 				wasConnected := p.IsConnected
 
+				// Detect if peer reconnected (new session after disconnect)
+				// This happens when session restarts - accumulate previous session traffic
+				newSessionStart := getSessionStartTime(*p, wgPeer.BytesUpload, wgPeer.BytesDownload, lastHandshake)
+				if newSessionStart != nil && p.LastSessionStart != nil && newSessionStart.After(*p.LastSessionStart) {
+					// New session detected - accumulate previous session traffic
+					slog.Debug("new session detected, accumulating previous session traffic",
+						"peer", wgPeer.Identifier,
+						"previous_received", p.BytesReceived,
+						"previous_transmitted", p.BytesTransmitted)
+					p.AccumulatedBytesReceived += p.BytesReceived
+					p.AccumulatedBytesTransmitted += p.BytesTransmitted
+				}
+
 				// Update with latest WireGuard data
 				p.UpdatedAt = time.Now()
 				p.LastHandshake = lastHandshake
 				p.Endpoint = wgPeer.Endpoint
 				p.BytesReceived = wgPeer.BytesUpload
 				p.BytesTransmitted = wgPeer.BytesDownload
-				p.LastSessionStart = getSessionStartTime(*p, wgPeer.BytesUpload, wgPeer.BytesDownload, lastHandshake)
+				p.LastSessionStart = newSessionStart
 
 				slog.Debug("claiming new peer connection",
 					"peer", wgPeer.Identifier,
 					"node", c.cfg.Core.ClusterNodeId,
 					"bytes_received", p.BytesReceived,
-					"bytes_transmitted", p.BytesTransmitted)
+					"bytes_transmitted", p.BytesTransmitted,
+					"accumulated_received", p.AccumulatedBytesReceived,
+					"accumulated_transmitted", p.AccumulatedBytesTransmitted)
 
 				// Force IsPingable=false if ping checks disabled
 				if !c.cfg.Statistics.UsePingChecks {
@@ -368,18 +383,33 @@ func (c *StatisticsCollector) updatePeerFromWireGuard(ctx context.Context, iface
 			func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
 				wasConnected := p.IsConnected
 
+				// Detect if peer reconnected (new session after disconnect)
+				// This happens when session restarts - accumulate previous session traffic
+				newSessionStart := getSessionStartTime(*p, wgPeer.BytesUpload, wgPeer.BytesDownload, lastHandshake)
+				if newSessionStart != nil && p.LastSessionStart != nil && newSessionStart.After(*p.LastSessionStart) {
+					// New session detected - accumulate previous session traffic
+					slog.Debug("new session detected, accumulating previous session traffic",
+						"peer", wgPeer.Identifier,
+						"previous_received", p.BytesReceived,
+						"previous_transmitted", p.BytesTransmitted)
+					p.AccumulatedBytesReceived += p.BytesReceived
+					p.AccumulatedBytesTransmitted += p.BytesTransmitted
+				}
+
 				// Update with latest WireGuard data
 				p.UpdatedAt = time.Now()
 				p.LastHandshake = lastHandshake
 				p.Endpoint = wgPeer.Endpoint
 				p.BytesReceived = wgPeer.BytesUpload
 				p.BytesTransmitted = wgPeer.BytesDownload
-				p.LastSessionStart = getSessionStartTime(*p, wgPeer.BytesUpload, wgPeer.BytesDownload, lastHandshake)
+				p.LastSessionStart = newSessionStart
 
 				slog.Debug("updating peer status from WireGuard",
 					"peer", wgPeer.Identifier,
 					"bytes_received", p.BytesReceived,
 					"bytes_transmitted", p.BytesTransmitted,
+					"accumulated_received", p.AccumulatedBytesReceived,
+					"accumulated_transmitted", p.AccumulatedBytesTransmitted,
 					"endpoint", p.Endpoint,
 					"last_handshake", p.LastHandshake)
 
@@ -423,13 +453,18 @@ func (c *StatisticsCollector) updatePeerFromWireGuard(ctx context.Context, iface
 		c.updatePeerMetrics(ctx, lastStatus, true)
 	}
 
-	// Only publish state change event if connection state changed
-	if stateChanged {
+	// Publish state change event if:
+	// - Connection state changed (connect/disconnect), OR
+	// - Peer is currently online (renew TTL on each update cycle)
+	if stateChanged || lastStatus.IsConnected {
 		c.bus.Publish(app.TopicPeerStateChanged, newStatus, *dbPeer)
 	}
 }
 
 func (c *StatisticsCollector) markPeerDisconnected(ctx context.Context, peerID domain.PeerIdentifier) {
+	// Capture the updated status and peer for publishing the event
+	var updatedStatus domain.PeerStatus
+	
 	err := c.db.UpdatePeerStatus(ctx, peerID,
 		func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
 			// Set peer as disconnected regardless of current state
@@ -439,6 +474,23 @@ func (c *StatisticsCollector) markPeerDisconnected(ctx context.Context, peerID d
 			
 			if wasConnected {
 				slog.Info("marking peer as disconnected", "peer", peerID, "was_connected", p.IsConnected, "was_pingable", p.IsPingable)
+				
+				// Accumulate the current session bytes before clearing
+				// This ensures we don't lose traffic data when peer disconnects
+				slog.Debug("accumulating traffic on disconnect",
+					"peer", peerID,
+					"session_received", p.BytesReceived,
+					"session_transmitted", p.BytesTransmitted,
+					"accumulated_received", p.AccumulatedBytesReceived,
+					"accumulated_transmitted", p.AccumulatedBytesTransmitted)
+				
+				// Add current session traffic to accumulated total
+				p.AccumulatedBytesReceived += p.BytesReceived
+				p.AccumulatedBytesTransmitted += p.BytesTransmitted
+				
+				// Clear current session bytes (will be overwritten by new session when peer reconnects)
+				p.BytesReceived = 0
+				p.BytesTransmitted = 0
 			}
 			
 			p.IsConnected = false
@@ -450,11 +502,30 @@ func (c *StatisticsCollector) markPeerDisconnected(ctx context.Context, peerID d
 			// Pass true to indicate state change (from possibly connected to disconnected)
 			c.updatePeerMetrics(ctx, *p, true)
 			
+			// Capture the updated status for event publishing
+			updatedStatus = *p
+			
 			return p, nil
 		})
 
 	if err != nil {
 		slog.Warn("failed to mark peer disconnected", "peer", peerID, "error", err)
+		return
+	}
+
+	// After marking disconnected, we need to trigger TTL update
+	// Get the peer from DB and publish state change event with captured status
+	dbPeer, err := c.db.GetPeer(ctx, peerID)
+	if err != nil {
+		slog.Warn("failed to get peer for TTL update event", "peer", peerID, "error", err)
+		return
+	}
+
+	// Publish the state change event so handlePeerStateChangeEvent can update the TTL
+	// This ensures DefaultUserTTL is applied when peer disconnects
+	slog.Debug("publishing peer state change for TTL update", "peer", peerID, "is_connected", updatedStatus.IsConnected)
+	if c.bus != nil {
+		c.bus.Publish(app.TopicPeerStateChanged, updatedStatus, *dbPeer)
 	}
 }
 

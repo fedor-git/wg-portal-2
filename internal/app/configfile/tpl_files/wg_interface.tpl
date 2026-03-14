@@ -32,7 +32,7 @@ DNS = {{ .Interface.DnsStr }}
 {{- if ne .Interface.FirewallMark 0}}
 FwMark = {{.Interface.FirewallMark}}
 {{- end}}
-{{- if ne .Interface.RoutingTable ""}}
+{{- if and (ne .Interface.RoutingTable "") (ne .Interface.RoutingTable "off")}}
 Table = {{.Interface.RoutingTable}}
 {{- end}}
 {{- if .Interface.SaveConfig}}

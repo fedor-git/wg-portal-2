@@ -16,10 +16,15 @@ type PeerMetrics struct {
 	// The last time the peer responded to a ICMP ping request.
 	LastPing *time.Time `json:"LastPing" example:"2021-01-01T12:00:00Z"`
 
-	// The number of bytes received by the peer.
+	// The number of bytes received by the peer in current session.
 	BytesReceived uint64 `json:"BytesReceived" example:"123456789"`
-	// The number of bytes transmitted by the peer.
+	// The number of bytes transmitted by the peer in current session.
 	BytesTransmitted uint64 `json:"BytesTransmitted" example:"123456789"`
+
+	// Total bytes received across all sessions.
+	AccumulatedBytesReceived uint64 `json:"AccumulatedBytesReceived" example:"1234567890"`
+	// Total bytes transmitted across all sessions.
+	AccumulatedBytesTransmitted uint64 `json:"AccumulatedBytesTransmitted" example:"1234567890"`
 
 	// The last time the peer initiated a handshake.
 	LastHandshake *time.Time `json:"LastHandshake" example:"2021-01-01T12:00:00Z"`
@@ -31,14 +36,16 @@ type PeerMetrics struct {
 
 func NewPeerMetrics(src *domain.PeerStatus) *PeerMetrics {
 	return &PeerMetrics{
-		PeerIdentifier:   string(src.PeerId),
-		IsPingable:       src.IsPingable,
-		LastPing:         src.LastPing,
-		BytesReceived:    src.BytesReceived,
-		BytesTransmitted: src.BytesTransmitted,
-		LastHandshake:    src.LastHandshake,
-		Endpoint:         src.Endpoint,
-		LastSessionStart: src.LastSessionStart,
+		PeerIdentifier:              string(src.PeerId),
+		IsPingable:                  src.IsPingable,
+		LastPing:                    src.LastPing,
+		BytesReceived:               src.BytesReceived,
+		BytesTransmitted:            src.BytesTransmitted,
+		AccumulatedBytesReceived:    src.AccumulatedBytesReceived,
+		AccumulatedBytesTransmitted: src.AccumulatedBytesTransmitted,
+		LastHandshake:               src.LastHandshake,
+		Endpoint:                    src.Endpoint,
+		LastSessionStart:            src.LastSessionStart,
 	}
 }
 

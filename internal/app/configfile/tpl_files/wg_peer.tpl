@@ -35,7 +35,7 @@ DNS = {{ .Peer.Interface.DnsStr.GetValue }} {{- if .Peer.Interface.DnsSearchStr.
 {{- if ne .Peer.Interface.Mtu.GetValue 0}}
 MTU = {{ .Peer.Interface.Mtu.GetValue }}
 {{- end}}
-{{- if ne .Peer.Interface.RoutingTable.GetValue ""}}
+{{- if and (ne .Peer.Interface.RoutingTable.GetValue "") (ne .Peer.Interface.RoutingTable.GetValue "off")}}
 Table = {{ .Peer.Interface.RoutingTable.GetValue }}
 {{- end}}
 {{- end}}

@@ -8,6 +8,24 @@ import { ipToBigInt } from '@/helpers/utils';
 
 const baseUrl = `/peer`
 
+// Helper function to calculate total traffic (accumulated + current session)
+// Falls back to current session if accumulated is null
+export const getTotalTraffic = (stat, isReceived = true) => {
+  if (!stat) {
+    return 0
+  }
+  
+  const accumulated = isReceived ? stat.AccumulatedBytesReceived : stat.AccumulatedBytesTransmitted
+  const current = isReceived ? stat.BytesReceived : stat.BytesTransmitted
+  
+  // If accumulated exists, add current to it; otherwise just use current
+  if (accumulated !== null && accumulated !== undefined) {
+    return (accumulated || 0) + (current || 0)
+  }
+  // Fallback: if accumulated is null, just show current session traffic
+  return (current || 0)
+}
+
 export const peerStore = defineStore('peers', {
   state: () => ({
     peers: [],
@@ -54,8 +72,8 @@ export const peerStore = defineStore('peers', {
           bValue = state.statsEnabled && state.stats[b.Identifier]?.IsConnected ? 1 : 0;
         }
         if (state.sortKey === 'Traffic') {
-          aValue = state.statsEnabled ? (state.stats[a.Identifier].BytesReceived + state.stats[a.Identifier].BytesTransmitted) : 0;
-          bValue = state.statsEnabled ? (state.stats[b.Identifier].BytesReceived + state.stats[b.Identifier].BytesTransmitted) : 0;
+          aValue = state.statsEnabled ? (getTotalTraffic(state.stats[a.Identifier], true) + getTotalTraffic(state.stats[a.Identifier], false)) : 0;
+          bValue = state.statsEnabled ? (getTotalTraffic(state.stats[b.Identifier], true) + getTotalTraffic(state.stats[b.Identifier], false)) : 0;
         }
         let result = 0;
         if (aValue > bValue) result = 1;

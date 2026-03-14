@@ -374,6 +374,18 @@ func (r *SqlRepo) migrate() error {
 	slog.Debug("running migration: audit data", "result", r.db.AutoMigrate(&domain.AuditEntry{}))
 	slog.Debug("running migration: node sync lock", "result", r.db.AutoMigrate(&NodeSyncLock{}))
 
+	// Clean up deprecated columns from peer_statuses table (traffic accumulation refactor)
+	// Previously we had PreviousSessionBytesReceived/Transmitted columns, now we use a simpler approach
+	// These columns are safe to drop if they exist
+	if r.db.Migrator().HasColumn("peer_statuses", "previous_session_received") {
+		slog.Debug("dropping deprecated column", "table", "peer_statuses", "column", "previous_session_received")
+		r.db.Migrator().DropColumn("peer_statuses", "previous_session_received")
+	}
+	if r.db.Migrator().HasColumn("peer_statuses", "previous_session_transmitted") {
+		slog.Debug("dropping deprecated column", "table", "peer_statuses", "column", "previous_session_transmitted")
+		r.db.Migrator().DropColumn("peer_statuses", "previous_session_transmitted")
+	}
+
 	existingSysStat := SysStat{}
 	r.db.Where("schema_version = ?", SchemaVersion).First(&existingSysStat)
 	if existingSysStat.SchemaVersion == 0 {
@@ -1660,12 +1672,13 @@ func (r *SqlRepo) GetExpiredPeers(ctx context.Context) ([]domain.Peer, error) {
 // DeletePeersByIDs deletes peers by their Identifier (public key) and their associated addresses
 // Used when cleaning up expired peers
 // IMPORTANT: Deletes peer_addresses associations first to avoid foreign key constraint violations
+// Also deletes peer statuses to avoid orphaned status records
 func (r *SqlRepo) DeletePeersByIDs(ctx context.Context, peerIDs []string) (int64, error) {
 	if len(peerIDs) == 0 {
 		return 0, nil
 	}
 
-	// Start transaction to ensure atomic deletion (associations first, then peers)
+	// Start transaction to ensure atomic deletion (associations first, then peers, then statuses)
 	tx := r.db.WithContext(ctx).Begin()
 	if tx.Error != nil {
 		return 0, tx.Error
@@ -1677,7 +1690,13 @@ func (r *SqlRepo) DeletePeersByIDs(ctx context.Context, peerIDs []string) (int64
 		return 0, err
 	}
 
-	// Second: delete peers
+	// Second: delete peer statuses to avoid orphaned status records
+	if err := tx.Where("peer_id IN ?", peerIDs).Delete(&domain.PeerStatus{}).Error; err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+
+	// Third: delete peers
 	result := tx.Where("identifier IN ?", peerIDs).Delete(&domain.Peer{})
 	if result.Error != nil {
 		tx.Rollback()

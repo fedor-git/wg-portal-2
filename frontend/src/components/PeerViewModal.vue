@@ -1,6 +1,7 @@
 <script setup>
 import Modal from "./Modal.vue";
-import { peerStore } from "@/stores/peers";
+// import { peerStore } from "@/stores/peers";
+import { peerStore, getTotalTraffic} from "@/stores/peers";
 import { interfaceStore } from "@/stores/interfaces";
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
@@ -200,8 +201,8 @@ function ConfigQrUrl() {
                 <div class="col-md-12">
                   <h4>{{ $t('modals.peer-view.traffic') }}</h4>
                   <p><i class="fas fa-long-arrow-alt-down" :title="$t('modals.peer-view.download')"></i> {{
-                    selectedStats.BytesReceived }} Bytes / <i class="fas fa-long-arrow-alt-up"
-                      :title="$t('modals.peer-view.upload')"></i> {{ selectedStats.BytesTransmitted }} Bytes</p>
+                    getTotalTraffic(selectedStats, true) }} Bytes / <i class="fas fa-long-arrow-alt-up"
+                      :title="$t('modals.peer-view.upload')"></i> {{ getTotalTraffic(selectedStats, false) }} Bytes</p>
                   <h4>{{ $t('modals.peer-view.connection-status') }}</h4>
                   <ul>
                     <li>{{ $t('modals.peer-view.pingable') }}: {{ selectedStats.IsPingable }}</li>
