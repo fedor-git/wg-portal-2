@@ -231,14 +231,16 @@ func NewPeerStats(enabled bool, src []domain.PeerStatus) *PeerStats {
 
 	for _, srcStat := range src {
 		stats[string(srcStat.PeerId)] = PeerStatData{
-			IsConnected:      srcStat.IsConnected,
-			IsPingable:       srcStat.IsPingable,
-			LastPing:         srcStat.LastPing,
-			BytesReceived:    srcStat.BytesReceived,
-			BytesTransmitted: srcStat.BytesTransmitted,
-			LastHandshake:    srcStat.LastHandshake,
-			EndpointAddress:  srcStat.Endpoint,
-			LastSessionStart: srcStat.LastSessionStart,
+			IsConnected:                 srcStat.IsConnected,
+			IsPingable:                  srcStat.IsPingable,
+			LastPing:                    srcStat.LastPing,
+			BytesReceived:               srcStat.BytesReceived,
+			BytesTransmitted:            srcStat.BytesTransmitted,
+			AccumulatedBytesReceived:    srcStat.AccumulatedBytesReceived,
+			AccumulatedBytesTransmitted: srcStat.AccumulatedBytesTransmitted,
+			LastHandshake:               srcStat.LastHandshake,
+			EndpointAddress:             srcStat.Endpoint,
+			LastSessionStart:            srcStat.LastSessionStart,
 		}
 	}
 
@@ -256,6 +258,9 @@ type PeerStatData struct {
 
 	BytesReceived    uint64 `json:"BytesReceived"`
 	BytesTransmitted uint64 `json:"BytesTransmitted"`
+
+	AccumulatedBytesReceived    uint64 `json:"AccumulatedBytesReceived"`
+	AccumulatedBytesTransmitted uint64 `json:"AccumulatedBytesTransmitted"`
 
 	LastHandshake    *time.Time `json:"LastHandshake"`
 	EndpointAddress  string     `json:"EndpointAddress"`

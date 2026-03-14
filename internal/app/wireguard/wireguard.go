@@ -509,37 +509,27 @@ func (m Manager) handlePeerStateChangeEvent(peerStatus domain.PeerStatus, peer d
 		return
 	}
 
-	// OPTIMIZATION: Only update TTL if peer has an expiration or if TTL should be extended
-	// This prevents unnecessary database writes when TTL is already set or not configured
-	shouldUpdateTTL := false
-	var newExpiresAt *time.Time
-
+	// Always update TTL when peer state changes
+	// - If peer is ONLINE: renews TTL (peer is active, defer deletion)
+	// - If peer is OFFLINE: sets TTL timer (countdown to removal)
+	expiryTime := time.Now().Add(ttlDuration)
+	
+	logAction := "setting TTL"
 	if peerStatus.IsConnected {
-		// Peer connected - only update if TTL is currently not set or already approaching expiry
-		if peer.ExpiresAt == nil || peer.IsExpired() {
-			expiryTime := time.Now().Add(ttlDuration)
-			newExpiresAt = &expiryTime
-			shouldUpdateTTL = true
-			slog.Info("peer connected, extending TTL", "peer", peer.Identifier, "new_expires_at", expiryTime.Format(time.RFC3339))
-		}
+		logAction = "renewing TTL (peer online)"
 	} else {
-		// Peer disconnected - always update (countdown to removal)
-		expiryTime := time.Now().Add(ttlDuration)
-		newExpiresAt = &expiryTime
-		shouldUpdateTTL = true
-		slog.Info("peer disconnected, setting expiration TTL", "peer", peer.Identifier, "expires_at", expiryTime.Format(time.RFC3339))
+		logAction = "setting TTL countdown (peer offline)"
 	}
 
-	// CRITICAL: Only update peer if TTL actually needs to change
-	// This reduces unnecessary database writes and event cascades
-	if shouldUpdateTTL {
-		updatedPeer := peer
-		updatedPeer.ExpiresAt = newExpiresAt
+	slog.Info("updating peer TTL", "peer", peer.Identifier, "action", logAction, "expires_at", expiryTime.Format(time.RFC3339))
 
-		_, err = m.UpdatePeer(ctx, &updatedPeer)
-		if err != nil {
-			slog.Error("failed to update peer TTL", "peer", peer.Identifier, "error", err)
-		}
+	// Update peer with new TTL
+	updatedPeer := peer
+	updatedPeer.ExpiresAt = &expiryTime
+
+	_, err = m.UpdatePeer(ctx, &updatedPeer)
+	if err != nil {
+		slog.Error("failed to update peer TTL", "peer", peer.Identifier, "error", err)
 	}
 }
 

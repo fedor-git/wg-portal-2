@@ -13,8 +13,16 @@ type PeerStatus struct {
 	IsPingable bool       `gorm:"column:pingable" json:"IsPingable"`
 	LastPing   *time.Time `gorm:"column:last_ping" json:"LastPing"`
 
+	// BytesReceived/BytesTransmitted: current session traffic (from WireGuard)
+	// Resets to 0 when peer reconnects (new session)
 	BytesReceived    uint64 `gorm:"column:received" json:"BytesReceived"`
 	BytesTransmitted uint64 `gorm:"column:transmitted" json:"BytesTransmitted"`
+
+	// AccumulatedBytesReceived/AccumulatedBytesTransmitted: total traffic across all sessions
+	// Updated on each status refresh by adding current session bytes
+	// This ensures traffic is never lost when peer reconnects or disconnects
+	AccumulatedBytesReceived    uint64 `gorm:"column:accumulated_received" json:"AccumulatedBytesReceived"`
+	AccumulatedBytesTransmitted uint64 `gorm:"column:accumulated_transmitted" json:"AccumulatedBytesTransmitted"`
 
 	LastHandshake    *time.Time `gorm:"column:last_handshake" json:"LastHandshake"`
 	Endpoint         string     `gorm:"column:endpoint" json:"Endpoint"`

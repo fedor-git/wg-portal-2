@@ -6,7 +6,7 @@ import InterfaceEditModal from "../components/InterfaceEditModal.vue";
 import InterfaceViewModal from "../components/InterfaceViewModal.vue";
 
 import {computed, onMounted, ref} from "vue";
-import {peerStore} from "@/stores/peers";
+import {peerStore, getTotalTraffic} from "@/stores/peers";
 import {interfaceStore} from "@/stores/interfaces";
 import {notify} from "@kyvg/vue3-notification";
 import {settingsStore} from "@/stores/settings";
@@ -568,7 +568,7 @@ onMounted(async () => {
             </div>
           </td>
           <td v-if="peers.hasStatistics" class="text-center">
-            <span>{{ humanFileSize(peers.Statistics(peer.Identifier).BytesReceived) }} / {{ humanFileSize(peers.Statistics(peer.Identifier).BytesTransmitted) }}</span>
+            <span>{{ humanFileSize(getTotalTraffic(peers.Statistics(peer.Identifier), true)) }} / {{ humanFileSize(getTotalTraffic(peers.Statistics(peer.Identifier), false)) }}</span>
           </td>
           <td class="text-center">
             <a href="#" :title="$t('interfaces.button-show-peer')" @click.prevent="viewedPeerId=peer.Identifier"><i class="fas fa-eye me-2"></i></a>
