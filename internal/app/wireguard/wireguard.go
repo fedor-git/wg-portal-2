@@ -417,15 +417,18 @@ func (m Manager) runExpiredPeersCheck(ctx context.Context) {
 		}
 	}
 
-	running := true
-	for running {
+	// Use time.Ticker instead of time.After() to prevent memory leak from unused timers
+	// time.After() creates new timers on every iteration that aren't garbage collected
+	ticker := time.NewTicker(m.cfg.Advanced.ExpiryCheckInterval)
+	defer ticker.Stop()
+
+	for {
 		select {
 		case <-ctx.Done():
-			running = false
 			slog.Info("[EXPIRE_CLEANUP] stopping expiry check loop", "node_id", nodeID)
-			continue
-		case <-time.After(m.cfg.Advanced.ExpiryCheckInterval):
-			// select blocks until one of the cases evaluate to true
+			return
+		case <-ticker.C:
+			// Timer fired, proceed with cleanup
 		}
 
 		// Attempt to delete expired peers with lock (only this master node does this)
@@ -694,9 +697,7 @@ func (m Manager) handlePeerInterfaceUpdatedEvent(interfaceId domain.InterfaceIde
 	slog.Debug("completed WireGuard interface sync", "interface", interfaceId)
 }
 
-// handlePeersExpiredRemovedEvent обробляє событие про видалені протухлі peer'ї
-// Цей обробник викликається коли FindAndDeleteExpiredPeersWithLock видалить peer'ків з DB
-// з lock'ом щоб тільки одна нода робила це, потім інші ноди видаляють локально
+// handlePeersExpiredRemovedEvent обробляє событие про видалені протухлі peer'
 func (m Manager) handlePeersExpiredRemovedEvent(expiredPeerIDs []string) {
 	ctx := context.Background()
 
