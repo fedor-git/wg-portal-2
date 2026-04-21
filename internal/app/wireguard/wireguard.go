@@ -36,6 +36,7 @@ type InterfaceAndPeerDatabaseRepo interface {
 	) error
 	DeletePeer(ctx context.Context, id domain.PeerIdentifier) error
 	GetPeer(ctx context.Context, id domain.PeerIdentifier) (*domain.Peer, error)
+	GetPeersByDisplayName(ctx context.Context, displayName string) ([]domain.Peer, error)
 	GetUsedIpsPerSubnet(ctx context.Context, subnets []domain.Cidr) (map[domain.Cidr][]domain.Cidr, error)
 	SyncAllPeersFromDB(ctx context.Context) (int, error) // Synchronize all peers from the database
 
@@ -100,10 +101,10 @@ func NewWireGuardManager(
 func (m Manager) StartBackgroundJobs(ctx context.Context) {
 	// Peer loading on startup is now handled by RestoreInterfaceState in main.go (if SyncOnStartup enabled)
 	// This function just signals completion to unblock fanout events
-	
+
 	// Metrics registration will be handled by statistics collector initialization (10 sec delay)
 	// or can be added explicitly here if needed for immediate metric availability
-	
+
 	// Signal that manager is ready - this unblocks fanout from sending events
 	close(m.startupComplete)
 }
@@ -516,7 +517,7 @@ func (m Manager) handlePeerStateChangeEvent(peerStatus domain.PeerStatus, peer d
 	// - If peer is ONLINE: renews TTL (peer is active, defer deletion)
 	// - If peer is OFFLINE: sets TTL timer (countdown to removal)
 	expiryTime := time.Now().Add(ttlDuration)
-	
+
 	logAction := "setting TTL"
 	if peerStatus.IsConnected {
 		logAction = "renewing TTL (peer online)"

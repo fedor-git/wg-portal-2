@@ -37,11 +37,12 @@ type User struct {
 	IsAdmin      bool
 
 	// optional fields
-	Firstname  string `form:"firstname" binding:"omitempty"`
-	Lastname   string `form:"lastname" binding:"omitempty"`
-	Phone      string `form:"phone" binding:"omitempty"`
-	Department string `form:"department" binding:"omitempty"`
-	Notes      string `form:"notes" binding:"omitempty"`
+	Firstname   string `form:"firstname" binding:"omitempty"`
+	Lastname    string `form:"lastname" binding:"omitempty"`
+	DisplayName string `form:"display_name" binding:"omitempty"`
+	Phone       string `form:"phone" binding:"omitempty"`
+	Department  string `form:"department" binding:"omitempty"`
+	Notes       string `form:"notes" binding:"omitempty"`
 
 	// optional, integrated password authentication
 	Password       PrivateString `form:"password" binding:"omitempty"`

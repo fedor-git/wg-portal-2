@@ -61,9 +61,9 @@ type StatisticsEventBus interface {
 }
 
 type pingJob struct {
-	Peer          domain.Peer
-	PhysicalPeer  domain.PhysicalPeer  // Pre-fetched WireGuard peer data to avoid duplicate lookups
-	Backend       domain.InterfaceBackend
+	Peer         domain.Peer
+	PhysicalPeer domain.PhysicalPeer // Pre-fetched WireGuard peer data to avoid duplicate lookups
+	Backend      domain.InterfaceBackend
 }
 
 type StatisticsCollector struct {
@@ -97,9 +97,9 @@ func NewStatisticsCollector(
 		cfg: cfg,
 		bus: bus,
 
-		db: db,
-		wg: wg,
-		ms: ms,
+		db:                   db,
+		wg:                   wg,
+		ms:                   ms,
 		activeConnectedPeers: make(map[domain.InterfaceIdentifier]map[domain.PeerIdentifier]bool),
 	}
 
@@ -199,8 +199,8 @@ func (c *StatisticsCollector) collectInterfaceData(ctx context.Context) {
 						i.BytesReceived = physicalInterface.BytesDownload
 						i.BytesTransmitted = physicalInterface.BytesUpload
 
-							// Update prometheus metrics synchronously to reduce goroutine overhead
-							c.updateInterfaceMetrics(*i)
+						// Update prometheus metrics synchronously to reduce goroutine overhead
+						c.updateInterfaceMetrics(*i)
 
 						return i, nil
 					})
@@ -226,7 +226,7 @@ func (c *StatisticsCollector) startPeerDataFetcher(ctx context.Context) {
 func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 	ticker := time.NewTicker(c.cfg.Statistics.DataCollectionInterval)
 	defer ticker.Stop()
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -256,48 +256,48 @@ func (c *StatisticsCollector) collectPeerData(ctx context.Context) {
 
 				// Filter to only recently active peers (handshake within 2 minutes)
 				activePeers := c.filterActivePeers(wgPeers)
-			slog.Debug("querying WireGuard", "interface", iface.Identifier, "total_peers", len(wgPeers), "active_peers", len(activePeers))
+				slog.Debug("querying WireGuard", "interface", iface.Identifier, "total_peers", len(wgPeers), "active_peers", len(activePeers))
 
-			// Track only the active peers from this cycle (will replace old cache at end)
-			currentActivePeers := make(map[domain.PeerIdentifier]bool)
+				// Track only the active peers from this cycle (will replace old cache at end)
+				currentActivePeers := make(map[domain.PeerIdentifier]bool)
 
-		for _, wgPeer := range activePeers {
-			currentActivePeers[wgPeer.Identifier] = true
+				for _, wgPeer := range activePeers {
+					currentActivePeers[wgPeer.Identifier] = true
 
-			// Check if this is a newly connected peer (not in our active cache yet)
-			isNewConnection := !c.activeConnectedPeers[iface.Identifier][wgPeer.Identifier]
+					// Check if this is a newly connected peer (not in our active cache yet)
+					isNewConnection := !c.activeConnectedPeers[iface.Identifier][wgPeer.Identifier]
 
-			// Process this active peer
-			// Pass isNewConnection flag so we can claim ownership for new connections
-			c.updatePeerFromWireGuard(ctx, iface, wgPeer, isNewConnection)
-		}
+					// Process this active peer
+					// Pass isNewConnection flag so we can claim ownership for new connections
+					c.updatePeerFromWireGuard(ctx, iface, wgPeer, isNewConnection)
+				}
 
-		// Detect peers that aged out (were active, now inactive)
-		// Only check peers we know have been active
-		var agedOutPeers []domain.PeerIdentifier
-		for oldPeerID := range c.activeConnectedPeers[iface.Identifier] {
-			if !currentActivePeers[oldPeerID] {
-				// Peer was active, now aged out (handshake > 2 min)
-				// Mark as offline to clean up metrics
-				agedOutPeers = append(agedOutPeers, oldPeerID)
-				c.markPeerDisconnected(ctx, oldPeerID)
-				// Remove from active cache
-				delete(c.activeConnectedPeers[iface.Identifier], oldPeerID)
-			}
-		}
+				// Detect peers that aged out (were active, now inactive)
+				// Only check peers we know have been active
+				var agedOutPeers []domain.PeerIdentifier
+				for oldPeerID := range c.activeConnectedPeers[iface.Identifier] {
+					if !currentActivePeers[oldPeerID] {
+						// Peer was active, now aged out (handshake > 2 min)
+						// Mark as offline to clean up metrics
+						agedOutPeers = append(agedOutPeers, oldPeerID)
+						c.markPeerDisconnected(ctx, oldPeerID)
+						// Remove from active cache
+						delete(c.activeConnectedPeers[iface.Identifier], oldPeerID)
+					}
+				}
 
-		if len(agedOutPeers) > 0 {
-			slog.Debug("peers aged out and marked disconnected",
-				"interface", iface.Identifier,
-				"count", len(agedOutPeers))
-			if len(agedOutPeers) <= 5 {
-				slog.Debug("aged out peers detail", "peers", agedOutPeers)
-			}
-		}
+				if len(agedOutPeers) > 0 {
+					slog.Debug("peers aged out and marked disconnected",
+						"interface", iface.Identifier,
+						"count", len(agedOutPeers))
+					if len(agedOutPeers) <= 5 {
+						slog.Debug("aged out peers detail", "peers", agedOutPeers)
+					}
+				}
 
-		// Update cache with currently active peers
-		// These are the only peers we need to track for cleanup next cycle
-		c.activeConnectedPeers[iface.Identifier] = currentActivePeers
+				// Update cache with currently active peers
+				// These are the only peers we need to track for cleanup next cycle
+				c.activeConnectedPeers[iface.Identifier] = currentActivePeers
 			}
 
 			c.activeConnectedPeersMu.Unlock()
@@ -372,16 +372,16 @@ func (c *StatisticsCollector) updatePeerFromWireGuard(ctx context.Context, iface
 			func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
 				wasConnected := p.IsConnected
 
-					// Update with latest WireGuard data
-					p.UpdatedAt = time.Now()
-					p.LastHandshake = lastHandshake
-					p.Endpoint = wgPeer.Endpoint
-					p.BytesReceived = wgPeer.BytesUpload
-					p.BytesTransmitted = wgPeer.BytesDownload
+				// Update with latest WireGuard data
+				p.UpdatedAt = time.Now()
+				p.LastHandshake = lastHandshake
+				p.Endpoint = wgPeer.Endpoint
+				p.BytesReceived = wgPeer.BytesUpload
+				p.BytesTransmitted = wgPeer.BytesDownload
 
-					slog.Debug("updating peer status from WireGuard",
-						"peer", wgPeer.Identifier,
-						"bytes_received", p.BytesReceived,
+				slog.Debug("updating peer status from WireGuard",
+					"peer", wgPeer.Identifier,
+					"bytes_received", p.BytesReceived,
 					"bytes_transmitted", p.BytesTransmitted)
 
 				// Force IsPingable=false if ping checks disabled
@@ -432,34 +432,34 @@ func (c *StatisticsCollector) updatePeerFromWireGuard(ctx context.Context, iface
 func (c *StatisticsCollector) markPeerDisconnected(ctx context.Context, peerID domain.PeerIdentifier) {
 	// Capture the updated status and peer for publishing the event
 	var updatedStatus domain.PeerStatus
-	
+
 	err := c.db.UpdatePeerStatus(ctx, peerID,
 		func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
 			// Set peer as disconnected regardless of current state
 			// We need to clean up metrics even if peer is already marked false
 			// because metrics might still be registered
 			wasConnected := p.IsConnected || p.IsPingable
-			
+
 			if wasConnected {
 				slog.Info("marking peer as disconnected", "peer", peerID, "was_connected", p.IsConnected, "was_pingable", p.IsPingable)
-				
-					// Clear current session bytes when peer goes offline
+
+				// Clear current session bytes when peer goes offline
 				p.BytesReceived = 0
 				p.BytesTransmitted = 0
 			}
-			
+
 			p.IsConnected = false
 			p.IsPingable = false
 			p.LastHandshake = nil
 			p.UpdatedAt = time.Now()
-			
+
 			// Always call updatePeerMetrics to clean up metrics
 			// Pass true to indicate state change (from possibly connected to disconnected)
 			c.updatePeerMetrics(ctx, *p, true)
-			
+
 			// Capture the updated status for event publishing
 			updatedStatus = *p
-			
+
 			return p, nil
 		})
 
@@ -716,7 +716,7 @@ func (c *StatisticsCollector) updatePeerMetrics(ctx context.Context, status doma
 			"peer", status.PeerId,
 			"state_changed", stateChanged,
 			"only_export_connected", c.cfg.Statistics.OnlyExportConnectedPeers)
-		
+
 		if stateChanged && c.cfg.Statistics.OnlyExportConnectedPeers {
 			c.ms.RemovePeerMetricsByID(string(status.PeerId))
 			slog.Info("removed peer metrics due to disconnection", "peer", status.PeerId)
@@ -729,8 +729,6 @@ func (c *StatisticsCollector) updatePeerMetrics(ctx context.Context, status doma
 	c.ms.RegisterPeerMetrics(peer)
 	slog.Debug("registered metrics for connected peer", "peer", status.PeerId)
 }
-
-
 
 func (c *StatisticsCollector) connectToMessageBus() {
 	_ = c.bus.Subscribe(app.TopicPeerIdentifierUpdated, c.handlePeerIdentifierChangeEvent)
@@ -753,7 +751,7 @@ func (c *StatisticsCollector) handlePeerDeleteEvent(peer domain.Peer) {
 	// IMMEDIATELY delete peer_status from database for instant cleanup
 	// This ensures peer data is cleaned up right away, not waiting for CleanOrphanedStatuses
 	ctx := domain.SetUserInfo(context.Background(), domain.SystemAdminContextUserInfo())
-	
+
 	if err := c.db.DeletePeerStatus(ctx, peer.Identifier); err != nil {
 		slog.Warn("failed to delete peer_status for deleted peer", "peerIdentifier", peer.Identifier, "error", err)
 	} else {
@@ -774,7 +772,7 @@ func (c *StatisticsCollector) handlePeersExpiredRemovedLocal(expiredPeerIDs []st
 
 	for _, peerID := range expiredPeerIDs {
 		peerId := domain.PeerIdentifier(peerID)
-		
+
 		// Remove from all interfaces' active peer caches
 		for ifaceID := range c.activeConnectedPeers {
 			if _, exists := c.activeConnectedPeers[ifaceID][peerId]; exists {

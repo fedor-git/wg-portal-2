@@ -102,6 +102,34 @@ func (m Manager) GetUserPeers(ctx context.Context, id domain.UserIdentifier) ([]
 	return peers, nil
 }
 
+// GetPeersByDisplayName retrieves all peers matching the given DisplayName
+func (m Manager) GetPeersByDisplayName(ctx context.Context, displayName string) ([]domain.Peer, error) {
+	peers, err := m.db.GetPeersByDisplayName(ctx, displayName)
+	if err != nil {
+		return nil, err
+	}
+
+	// For API response: show AllowedIPs from interface config
+	// Get all interfaces to map InterfaceIdentifier -> PeerDefAllowedIPsStr
+	interfaces, err := m.db.GetAllInterfaces(ctx)
+	if err == nil {
+		ifaceMap := make(map[domain.InterfaceIdentifier]string)
+		for _, iface := range interfaces {
+			ifaceMap[iface.Identifier] = iface.PeerDefAllowedIPsStr
+		}
+
+		for i := range peers {
+			if peers[i].Interface.Type == domain.InterfaceTypeClient {
+				if allowedIPs, ok := ifaceMap[peers[i].InterfaceIdentifier]; ok {
+					peers[i].AllowedIPsStr.Value = allowedIPs
+				}
+			}
+		}
+	}
+
+	return peers, nil
+}
+
 // PreparePeer prepares a new peer for the given interface with fresh keys and ip addresses.
 func (m Manager) PreparePeer(ctx context.Context, id domain.InterfaceIdentifier) (*domain.Peer, error) {
 	if !m.cfg.Core.SelfProvisioningAllowed {
