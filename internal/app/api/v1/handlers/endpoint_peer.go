@@ -19,6 +19,7 @@ type PeerService interface {
 	GetForInterface(context.Context, domain.InterfaceIdentifier) ([]domain.Peer, error)
 	GetForUser(context.Context, domain.UserIdentifier) ([]domain.Peer, error)
 	GetById(context.Context, domain.PeerIdentifier) (*domain.Peer, error)
+	GetByDisplayName(context.Context, string) ([]domain.Peer, error)
 	GetAllInterfaces(context.Context) ([]domain.Interface, error)
 	Prepare(ctx context.Context, id domain.InterfaceIdentifier) (*domain.Peer, error)
 	Create(context.Context, *domain.Peer) (*domain.Peer, error)
@@ -37,7 +38,8 @@ type PeerEndpoint struct {
 
 func NewPeerEndpoint(
 	authenticator Authenticator,
-	validator Validator, peerService PeerService,
+	validator Validator,
+	peerService PeerService,
 ) *PeerEndpoint {
 	return &PeerEndpoint{
 		authenticator: authenticator,
@@ -46,12 +48,12 @@ func NewPeerEndpoint(
 	}
 }
 
-func (e PeerEndpoint) GetName() string {
-	return "PeerEndpoint"
-}
-
 func (e *PeerEndpoint) SetEventBus(bus app.EventBus) {
 	e.bus = bus
+}
+
+func (e PeerEndpoint) GetName() string {
+	return "PeerEndpoint"
 }
 
 func (e *PeerEndpoint) publish(topic string, args ...any) {
@@ -75,6 +77,7 @@ func (e PeerEndpoint) RegisterRoutes(g *routegroup.Bundle) {
 	apiGroup.With(e.authenticator.LoggedIn(ScopeAdmin)).HandleFunc("POST /new", e.handleCreatePost())
 	apiGroup.With(e.authenticator.LoggedIn(ScopeAdmin)).HandleFunc("PUT /by-id/{id}", e.handleUpdatePut())
 	apiGroup.With(e.authenticator.LoggedIn(ScopeAdmin)).HandleFunc("DELETE /by-id/{id}", e.handleDelete())
+	apiGroup.With(e.authenticator.LoggedIn(ScopeAdmin)).HandleFunc("DELETE /by-name", e.handleDeleteByName())
 
 	// POST /sync is for node-to-node fanout calls (no authentication required)
 	// These are server-to-server sync calls via fanout, not user-initiated
@@ -364,6 +367,112 @@ func (e PeerEndpoint) handleDelete() http.HandlerFunc {
 		e.publish("peers.updated", "v1:delete")
 
 		respond.Status(w, http.StatusNoContent)
+	}
+}
+
+// handleDeleteByName returns a handler function for batch deletion of peers by display name.
+//
+// @ID peers_handleDeleteByName
+// @Tags Peers
+// @Summary Delete peer records by DisplayName in batch.
+// @Description Only admins can delete records. This endpoint allows deleting all peers with given display names. Uses optimized direct database query.
+// @Param request body []map[string]string true "Array of objects with DisplayName field"
+// @Produce json
+// @Success 200 {object} []map[string]string "Array of deletion results with DisplayName and status"
+// @Failure 400 {object} models.Error
+// @Failure 401 {object} models.Error
+// @Failure 403 {object} models.Error
+// @Failure 500 {object} models.Error
+// @Router /peer/by-name [delete]
+// @Security BasicAuth
+func (e PeerEndpoint) handleDeleteByName() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// Parse request body as array of objects with displayName
+		var body []map[string]interface{}
+		if err := request.BodyJson(r, &body); err != nil {
+			respond.JSON(w, http.StatusBadRequest,
+				models.Error{Code: http.StatusBadRequest, Message: "invalid request body: " + err.Error()})
+			return
+		}
+
+		if len(body) == 0 {
+			respond.JSON(w, http.StatusBadRequest,
+				models.Error{Code: http.StatusBadRequest, Message: "request body cannot be empty"})
+			return
+		}
+
+		// Collect results
+		results := make([]map[string]string, 0, len(body))
+
+		// Process each displayName
+		for _, displayObj := range body {
+			var displayName string
+
+			// Try multiple key variants: displayName, DisplayName, display_name
+			if val, ok := displayObj["displayName"]; ok && val != nil {
+				if str, ok := val.(string); ok {
+					displayName = str
+				}
+			} else if val, ok := displayObj["DisplayName"]; ok && val != nil {
+				if str, ok := val.(string); ok {
+					displayName = str
+				}
+			} else if val, ok := displayObj["display_name"]; ok && val != nil {
+				if str, ok := val.(string); ok {
+					displayName = str
+				}
+			}
+
+			if displayName == "" {
+				results = append(results, map[string]string{
+					"displayName": "N/A",
+					"status":      "Invalid",
+				})
+				continue
+			}
+
+			// Get all peers with this displayName directly from database
+			peers, err := e.peers.GetByDisplayName(r.Context(), displayName)
+			if err != nil || len(peers) == 0 {
+				results = append(results, map[string]string{
+					"displayName": displayName,
+					"status":      "Not found",
+				})
+				continue
+			}
+
+			// Delete all peers with this displayName
+			deletedCount := 0
+			for _, peer := range peers {
+				err := e.peers.Delete(r.Context(), peer.Identifier)
+				if err != nil {
+					slog.Warn("failed to delete peer", "peer_id", peer.Identifier, "DisplayName", displayName, "error", err)
+					// Continue deleting other peers even if one fails
+					continue
+				}
+				deletedCount++
+
+				// Publish deletion events for each peer
+				e.publish("peer.delete", peer.Identifier)
+			}
+
+			// Determine status based on deletion results
+			status := "Not found"
+			if deletedCount > 0 {
+				status = "Deleted"
+				e.publish("peers.updated", "v1:batch-delete")
+			} else if len(peers) > 0 {
+				// Peers exist but all deletions failed
+				status = "Failed"
+			}
+
+			results = append(results, map[string]string{
+				"displayName": displayName,
+				"status":      status,
+			})
+		}
+
+		respond.JSON(w, http.StatusOK, results)
 	}
 }
 

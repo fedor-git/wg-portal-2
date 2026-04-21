@@ -321,7 +321,7 @@ func MergeToPhysicalPeer(pp *PhysicalPeer, p *Peer, forceClientIPAsAllowedIP boo
 		"type", p.Interface.Type,
 		"Addresses_count", len(p.Interface.Addresses),
 		"forceClientIPAsAllowedIP", forceClientIPAsAllowedIP)
-	
+
 	pp.Identifier = p.Identifier
 	pp.Endpoint = p.Endpoint.GetValue()
 	if p.Interface.Type == InterfaceTypeServer {
@@ -332,14 +332,14 @@ func MergeToPhysicalPeer(pp *PhysicalPeer, p *Peer, forceClientIPAsAllowedIP boo
 	} else {
 		// For client-type peers on server side
 		var allowedIPs []Cidr
-		
+
 		if forceClientIPAsAllowedIP {
 			// FORCE MODE: Always use client's IP addresses, ignore AllowedIPsStr
 			// This prevents overlapping AllowedIPs (multiple peers with 0.0.0.0/0)
 			allowedIPs = make([]Cidr, len(p.Interface.Addresses))
 			for i, ip := range p.Interface.Addresses {
 				allowedIPs[i] = ip.HostAddr()
-				slog.Debug("[MergeToPhysicalPeer] FORCED: Using Interface.Address", 
+				slog.Debug("[MergeToPhysicalPeer] FORCED: Using Interface.Address",
 					"index", i, "address", ip.String(), "hostAddr", ip.HostAddr().String())
 			}
 		} else {
@@ -356,7 +356,7 @@ func MergeToPhysicalPeer(pp *PhysicalPeer, p *Peer, forceClientIPAsAllowedIP boo
 				slog.Debug("[MergeToPhysicalPeer] Using Interface.Addresses (fallback)", "count", len(allowedIPs))
 			}
 		}
-		
+
 		extraAllowedIPs, _ := CidrsFromString(p.ExtraAllowedIPsStr)
 		pp.AllowedIPs = append(allowedIPs, extraAllowedIPs...)
 		slog.Debug("[MergeToPhysicalPeer] Client type final", "allowedIPs_count", len(pp.AllowedIPs))

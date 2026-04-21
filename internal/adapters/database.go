@@ -719,6 +719,18 @@ func (r *SqlRepo) GetUserPeers(ctx context.Context, id domain.UserIdentifier) ([
 	return peers, nil
 }
 
+// GetPeersByDisplayName returns all peers with the given display name.
+func (r *SqlRepo) GetPeersByDisplayName(ctx context.Context, displayName string) ([]domain.Peer, error) {
+	var peers []domain.Peer
+
+	err := r.db.WithContext(ctx).Preload("Addresses").Where("display_name = ?", displayName).Find(&peers).Error
+	if err != nil {
+		return nil, err
+	}
+
+	return peers, nil
+}
+
 // FindUserPeers returns all peers associated with the given user id that match the given search string.
 // The search string is matched against the peer identifier, display name and IP address.
 func (r *SqlRepo) FindUserPeers(ctx context.Context, id domain.UserIdentifier, search string) ([]domain.Peer, error) {
@@ -1239,11 +1251,11 @@ func (r *SqlRepo) UpdatePeerStatus(
 			// BUT keep non-conflicting data like bytes and endpoint
 			if oldIsConnected && oldOwnerNodeId != "" && oldOwnerNodeId != r.cfg.Core.ClusterNodeId {
 				slog.Info("peer status owned by other node, restoring conflicting fields but KEEPING bytes",
-					"peer", id, 
-					"owner", oldOwnerNodeId, 
+					"peer", id,
+					"owner", oldOwnerNodeId,
 					"our_node", r.cfg.Core.ClusterNodeId,
 					"restored_is_connected", oldIsConnected,
-					"bytes_received", in.BytesReceived, 
+					"bytes_received", in.BytesReceived,
 					"bytes_transmitted", in.BytesTransmitted,
 					"last_handshake", in.LastHandshake,
 					"endpoint", in.Endpoint)

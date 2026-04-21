@@ -13,6 +13,7 @@ import (
 type PeerServicePeerManagerRepo interface {
 	GetPeer(ctx context.Context, id domain.PeerIdentifier) (*domain.Peer, error)
 	GetUserPeers(ctx context.Context, id domain.UserIdentifier) ([]domain.Peer, error)
+	GetPeersByDisplayName(ctx context.Context, displayName string) ([]domain.Peer, error)
 	GetInterfaceAndPeers(ctx context.Context, id domain.InterfaceIdentifier) (*domain.Interface, []domain.Peer, error)
 	GetAllInterfaces(ctx context.Context) ([]domain.Interface, error)
 	PreparePeer(ctx context.Context, id domain.InterfaceIdentifier) (*domain.Peer, error)
@@ -26,10 +27,10 @@ type PeerServiceUserManagerRepo interface {
 }
 
 type PeerService struct {
-	cfg       *config.Config
-	peers     PeerServicePeerManagerRepo
-	users     PeerServiceUserManagerRepo
-	metrics   *adapters.MetricsServer
+	cfg     *config.Config
+	peers   PeerServicePeerManagerRepo
+	users   PeerServiceUserManagerRepo
+	metrics *adapters.MetricsServer
 }
 
 func NewPeerService(
@@ -98,6 +99,19 @@ func (s PeerService) GetById(ctx context.Context, id domain.PeerIdentifier) (*do
 	}
 
 	return peer, nil
+}
+
+func (s PeerService) GetByDisplayName(ctx context.Context, displayName string) ([]domain.Peer, error) {
+	if err := domain.ValidateAdminAccessRights(ctx); err != nil {
+		return nil, err
+	}
+
+	peers, err := s.peers.GetPeersByDisplayName(ctx, displayName)
+	if err != nil {
+		return nil, err
+	}
+
+	return peers, nil
 }
 
 func (s PeerService) GetAllInterfaces(ctx context.Context) ([]domain.Interface, error) {
