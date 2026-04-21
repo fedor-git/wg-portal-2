@@ -575,7 +575,7 @@ func (r *SqlRepo) getOrCreateInterface(
 		Identifier: id,
 	}
 
-	err := tx.Attrs(interfaceDefaults).FirstOrCreate(&in, id).Error
+	err := tx.Preload("Addresses").Attrs(interfaceDefaults).FirstOrCreate(&in, id).Error
 	if err != nil {
 		return nil, err
 	}
@@ -592,9 +592,13 @@ func (r *SqlRepo) upsertInterface(ui *domain.ContextUserInfo, tx *gorm.DB, in *d
 		return err
 	}
 
-	err = tx.Model(in).Association("Addresses").Replace(in.Addresses)
-	if err != nil {
-		return fmt.Errorf("failed to update interface addresses: %w", err)
+	// Only update addresses if they were explicitly set (not nil)
+	// This prevents accidentally deleting all addresses when loading interface without preload
+	if in.Addresses != nil {
+		err = tx.Model(in).Association("Addresses").Replace(in.Addresses)
+		if err != nil {
+			return fmt.Errorf("failed to update interface addresses: %w", err)
+		}
 	}
 
 	return nil
