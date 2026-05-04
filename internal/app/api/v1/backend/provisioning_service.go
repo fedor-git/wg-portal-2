@@ -170,13 +170,20 @@ func (p ProvisioningService) NewPeer(ctx context.Context, req models.Provisionin
 		peer.GenerateDisplayName("API")
 	}
 
-	if req.ExpiresAt != "" {
+	// Only set expiration if DoNotExpire is not set
+	if !req.DoNotExpire && req.ExpiresAt != "" {
 		expiryDate, err := time.Parse(time.RFC3339, req.ExpiresAt)
 		if err != nil {
 			return nil, fmt.Errorf("invalid ExpiresAt format, expected RFC3339: %w", err)
 		}
 		peer.ExpiresAt = &expiryDate
+		// Lock TTL only if user explicitly provided the date (not default)
+		// Default TTL should allow activity tracking to update the expiration
+		if !req.ExpiresAtIsDefault {
+			peer.TTLLocked = true
+		}
 	}
+	// If DoNotExpire is true, ExpiresAt remains nil (peer will not expire)
 
 	// save new peer
 	peer, err = p.peers.CreatePeer(ctx, peer)

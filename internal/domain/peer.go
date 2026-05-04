@@ -49,6 +49,7 @@ type Peer struct {
 	Disabled             *time.Time          `gorm:"column:disabled"`                   // if this field is set, the peer is disabled
 	DisabledReason       string              // the reason why the peer has been disabled
 	ExpiresAt            *time.Time          `gorm:"column:expires_at"`         // expiry dates for peers
+	TTLLocked            bool                `gorm:"column:ttl_locked;default:false"` // if true, ExpiresAt should not be changed by activity tracking
 	Notes                string              `form:"notes" binding:"omitempty"` // a note field for peers
 	AutomaticallyCreated bool                `gorm:"column:auto_created"`       // specifies if the peer was automatically created
 
@@ -144,7 +145,23 @@ func (p *Peer) OverwriteUserEditableFields(userPeer *Peer, cfg *config.Config) {
 	}
 	p.Interface.Mtu = userPeer.Interface.Mtu
 	p.PersistentKeepalive = userPeer.PersistentKeepalive
-	p.ExpiresAt = userPeer.ExpiresAt
+	
+	// Handle ExpiresAt with TTL locking
+	// If user explicitly sets ExpiresAt to a new value, lock TTL so activity tracking won't override it
+	if userPeer.ExpiresAt != p.ExpiresAt {
+		p.ExpiresAt = userPeer.ExpiresAt
+		if userPeer.ExpiresAt != nil {
+			// User explicitly set an expiration date, lock it
+			p.TTLLocked = true
+		}
+	}
+	
+	// Allow users to explicitly unlock TTL if they set ExpiresAt to nil
+	// This means peer will revert to activity-based TTL tracking
+	if userPeer.ExpiresAt == nil && p.ExpiresAt != nil {
+		p.TTLLocked = false
+	}
+	
 	p.Disabled = userPeer.Disabled
 	p.DisabledReason = userPeer.DisabledReason
 }

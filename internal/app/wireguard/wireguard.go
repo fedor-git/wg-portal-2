@@ -513,6 +513,12 @@ func (m Manager) handlePeerStateChangeEvent(peerStatus domain.PeerStatus, peer d
 		return
 	}
 
+	// Skip TTL update if TTL is locked (explicitly set)
+	if peer.TTLLocked {
+		slog.Debug("skipping TTL update - TTL is locked for peer", "peer", peer.Identifier)
+		return
+	}
+
 	// Always update TTL when peer state changes
 	// - If peer is ONLINE: renews TTL (peer is active, defer deletion)
 	// - If peer is OFFLINE: sets TTL timer (countdown to removal)
