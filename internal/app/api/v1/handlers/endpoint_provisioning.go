@@ -224,14 +224,15 @@ func (e ProvisioningEndpoint) handleNewPeerPost() http.HandlerFunc {
 			return
 		}
 
-		// Set default Expiry date if not provided
-		if req.ExpiresAt == "" {
+		// Set default Expiry date if not provided and DoNotExpire is not set
+		if req.ExpiresAt == "" && !req.DoNotExpire {
 			ttlStr := e.provisioning.GetConfig().Core.DefaultUserTTL
 			if ttlStr != "" {
 				if ttlDuration, err := config.ParseDurationWithDays(ttlStr); err == nil {
 					currentDate := time.Now()
 					expiryDate := currentDate.Add(ttlDuration)
 					req.ExpiresAt = expiryDate.Format(time.RFC3339)
+							req.ExpiresAtIsDefault = true // Mark that this is default TTL, not user-provided
 				}
 			}
 		}

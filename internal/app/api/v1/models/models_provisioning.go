@@ -75,4 +75,10 @@ type ProvisioningRequest struct {
 	PresharedKey string `json:"PresharedKey" example:"yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=" binding:"omitempty,len=44"`
 	// ExpiresAt defines the expiration date and time of the user in RFC3339 format.
 	ExpiresAt string `json:"ExpiresAt" example:"2025-09-18T15:04:05Z" binding:"omitempty,datetime=2006-01-02T15:04:05Z07:00"`
+	// DoNotExpire if set to true, the peer will not expire and will not be affected by delete_expired_peers setting.
+	DoNotExpire bool `json:"DoNotExpire" example:"true" binding:"omitempty"`
+	// ExpiresAtIsDefault is set by the endpoint when default TTL is applied (not provided by user).
+	// When true, the peer's expiration can be updated by activity tracking.
+	// This is an internal field and should not be set by API clients.
+	ExpiresAtIsDefault bool `json:"-"`
 }
