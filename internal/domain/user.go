@@ -187,6 +187,17 @@ func (u *User) CopyCalculatedAttributes(src *User) {
 	u.IsAdmin = src.IsAdmin // CRITICAL: protect IsAdmin from client-supplied input (CVE)
 }
 
+// CopyCalculatedAttributesFromExisting copies calculated attributes from an existing
+// record but does NOT overwrite receiver's IsAdmin flag. Use this when creating
+// a new user record to preserve the intended IsAdmin value supplied by the
+// creator (for example when the system creates the default admin).
+func (u *User) CopyCalculatedAttributesFromExisting(src *User) {
+	u.BaseModel = src.BaseModel
+	u.LinkedPeerCount = src.LinkedPeerCount
+	// Intentionally do NOT copy IsAdmin here so that newly created users
+	// (for example system-created default admin) keep their IsAdmin value.
+}
+
 // region webauthn
 
 func (u *User) WebAuthnID() []byte {

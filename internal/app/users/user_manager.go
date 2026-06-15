@@ -255,7 +255,10 @@ func (m Manager) CreateUser(ctx context.Context, user *domain.User) (*domain.Use
 	}
 
 	err = m.users.SaveUser(ctx, user.Identifier, func(u *domain.User) (*domain.User, error) {
-		user.CopyCalculatedAttributes(u)
+		// When creating a new user, preserve the IsAdmin value supplied by the
+		// creator (e.g. system default admin). Do not overwrite it with the
+		// placeholder/default record created by the repo layer.
+		user.CopyCalculatedAttributesFromExisting(u)
 		return user, nil
 	})
 	if err != nil {
