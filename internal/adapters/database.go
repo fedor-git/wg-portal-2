@@ -1888,45 +1888,100 @@ func (r *SqlRepo) DeletePeersByIDs(ctx context.Context, peerIDs []string) (int64
 		return 0, nil
 	}
 
-	// Start transaction to ensure atomic deletion (associations first, then peers, then statuses)
-	tx := r.db.WithContext(ctx).Begin()
-	if tx.Error != nil {
-		return 0, tx.Error
+	// If the list is large, deleting all rows in a single big transaction
+	// may cause InnoDB deadlocks under high concurrency. Delete in chunks
+	// and retry on deadlock to reduce contention.
+	const chunkSize = 200
+	var totalDeleted int64
+
+	// Helper to detect deadlock by error text (MySQL 1213)
+	isDeadlockErr := func(err error) bool {
+		if err == nil {
+			return false
+		}
+		s := err.Error()
+		return strings.Contains(s, "Deadlock") || strings.Contains(s, "deadlock") || strings.Contains(s, "Error 1213")
 	}
 
-	// First: delete peer_addresses many2many associations via raw SQL
-	if err := tx.Table("peer_addresses").Where("peer_identifier IN ?", peerIDs).Delete(nil).Error; err != nil {
-		tx.Rollback()
-		return 0, err
-	}
+	for start := 0; start < len(peerIDs); start += chunkSize {
+		end := start + chunkSize
+		if end > len(peerIDs) {
+			end = len(peerIDs)
+		}
+		chunk := peerIDs[start:end]
 
-	// Second: delete peer statuses to avoid orphaned status records
-	if err := tx.Where("identifier IN ?", peerIDs).Delete(&domain.PeerStatus{}).Error; err != nil {
-		tx.Rollback()
-		return 0, err
-	}
+		// retry loop for this chunk
+		var lastErr error
+		for attempt := 0; attempt < 4; attempt++ {
+			if attempt > 0 {
+				time.Sleep(time.Duration(attempt) * 150 * time.Millisecond)
+			}
 
-	// Third: delete peers
-	result := tx.Where("identifier IN ?", peerIDs).Delete(&domain.Peer{})
-	if result.Error != nil {
-		tx.Rollback()
-		return 0, result.Error
-	}
+			tx := r.db.WithContext(ctx).Begin()
+			if tx.Error != nil {
+				lastErr = tx.Error
+				continue
+			}
 
-	// Commit transaction
-	if err := tx.Commit().Error; err != nil {
-		return 0, err
-	}
+			// delete associations first
+			if err := tx.Table("peer_addresses").Where("peer_identifier IN ?", chunk).Delete(nil).Error; err != nil {
+				tx.Rollback()
+				lastErr = err
+				if isDeadlockErr(err) {
+					continue
+				}
+				break
+			}
 
-	// Remove Prometheus metrics for all deleted peers
-	// This prevents orphaned metrics for bulk-deleted peers
-	if r.metricsCallback != nil {
-		for _, peerID := range peerIDs {
-			r.metricsCallback(peerID)
+			// delete statuses
+			if err := tx.Where("identifier IN ?", chunk).Delete(&domain.PeerStatus{}).Error; err != nil {
+				tx.Rollback()
+				lastErr = err
+				if isDeadlockErr(err) {
+					continue
+				}
+				break
+			}
+
+			// delete peers
+			res := tx.Where("identifier IN ?", chunk).Delete(&domain.Peer{})
+			if res.Error != nil {
+				tx.Rollback()
+				lastErr = res.Error
+				if isDeadlockErr(res.Error) {
+					continue
+				}
+				break
+			}
+
+			if err := tx.Commit().Error; err != nil {
+				lastErr = err
+				if isDeadlockErr(err) {
+					continue
+				}
+				break
+			}
+
+			// successful commit
+			totalDeleted += res.RowsAffected
+
+			// remove metrics for this chunk
+			if r.metricsCallback != nil {
+				for _, peerID := range chunk {
+					r.metricsCallback(peerID)
+				}
+			}
+
+			lastErr = nil
+			break
+		}
+
+		if lastErr != nil {
+			return totalDeleted, lastErr
 		}
 	}
 
-	return result.RowsAffected, nil
+	return totalDeleted, nil
 }
 
 // FindAndDeleteExpiredPeersWithLock ensures only MASTER node deletes expired peers
