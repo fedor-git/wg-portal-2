@@ -41,6 +41,8 @@ POST /provisioning/new-peer
 ```
 Result: `ExpiresAt = now + DefaultUserTTL`, `TTLLocked = false` ✅ Updates on activity
 
+**Note:** The database layer was incorrectly overriding this and setting `TTLLocked = true`. This has been fixed.
+
 ### 2. Explicit Date (locked):
 ```json
 POST /provisioning/new-peer

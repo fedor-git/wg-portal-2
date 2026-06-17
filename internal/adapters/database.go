@@ -800,18 +800,6 @@ func (r *SqlRepo) SavePeer(
 			return err
 		}
 
-		// CRITICAL: Ensure TTLLocked is set to true if peer has explicit future expiration date
-		// This handles cases where:
-		// 1. User sets ExpiresAt via API but TTLLocked wasn't set (legacy or update scenario)
-		// 2. Peer was created with explicit future date (far in future, beyond 1 hour)
-		// We use 1 hour threshold to distinguish explicit dates from "now + DefaultUserTTL"
-		if peer.ExpiresAt != nil && peer.ExpiresAt.After(time.Now().Add(1*time.Hour)) && !peer.TTLLocked {
-			slog.Debug("automatically locking TTL for peer with explicit future expiration",
-				"peer", id,
-				"expires_at", peer.ExpiresAt.Format(time.RFC3339))
-			peer.TTLLocked = true
-		}
-
 		err = r.upsertPeer(userInfo, tx, peer)
 		if err != nil {
 			return err
@@ -819,20 +807,29 @@ func (r *SqlRepo) SavePeer(
 
 		// DEADLOCK FIX: Ensure peer_status record exists WITHOUT FOR UPDATE lock
 		// This prevents lock contention when stats collection immediately tries to update it
-		// CRITICAL: Reset peer_status if peer was recreated with same ID to avoid inheriting old stats
-		// (e.g., if old peer was online, new peer would show as online until stats update)
-		// IMPORTANT: Also remove metrics for the peer being recreated to avoid duplicate metric values
-		// When a peer is recreated with same ID, old label values remain in Prometheus registry
-		// This causes metrics to show x3 values (old labels + new labels + potential dups)
+		// CRITICAL: Only reset peer_status if peer identifier changed (peer was recreated with new public key)
+		// For normal updates (like TTL refresh), preserve existing peer_status to maintain connected state
 		var existingStatus domain.PeerStatus
 		statusExists := tx.Where("identifier = ?", id).First(&existingStatus).Error == nil
 
-		if statusExists {
+		// Check if this is a peer recreation (identifier changed from existing peer to new peer)
+		// This happens when public key changes. If identifier hasn't changed, preserve the peer_status
+		isIdentifierChange := existingStatus.PeerId != domain.PeerIdentifier(peer.Identifier)
+
+		if statusExists && isIdentifierChange {
+			// Only if identifier changed (peer recreation):
+			// 1. Remove old metrics before resetting status
+			// 2. Reset existing status to clean state for newly-identified peer
+			slog.Debug("peer identifier changed (recreation), removing metrics and resetting status",
+				"peer", id,
+				"old_identifier", existingStatus.PeerId,
+				"new_identifier", peer.Identifier)
+
 			// IMPORTANT: Remove old metrics BEFORE resetting status
 			// This ensures we don't have duplicate label values in Prometheus
 			r.removeMetricsForPeer(string(id))
 
-			// Reset existing status to clean state for new peer
+			// Reset existing status to clean state for newly-identified peer
 			cleanStatus := domain.PeerStatus{
 				PeerId:           id,
 				UpdatedAt:        time.Now(),
@@ -849,7 +846,7 @@ func (r *SqlRepo) SavePeer(
 			if err != nil {
 				slog.Debug("failed to reset peer status", "peer", id, "error", err)
 			}
-		} else {
+		} else if !statusExists {
 			// Create new status record for new peer
 			peerStatus := domain.PeerStatus{
 				PeerId:    id,
@@ -860,6 +857,7 @@ func (r *SqlRepo) SavePeer(
 				slog.Debug("peer status record creation deferred", "peer", id, "error", err)
 			}
 		}
+		// If statusExists && !isIdentifierChange (normal update), do nothing - preserve peer_status
 
 		// return nil will commit the whole transaction
 		return nil

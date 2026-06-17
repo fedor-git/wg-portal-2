@@ -146,21 +146,9 @@ func (p *Peer) OverwriteUserEditableFields(userPeer *Peer, cfg *config.Config) {
 	p.Interface.Mtu = userPeer.Interface.Mtu
 	p.PersistentKeepalive = userPeer.PersistentKeepalive
 	
-	// Handle ExpiresAt with TTL locking
-	// If user explicitly sets ExpiresAt to a new value, lock TTL so activity tracking won't override it
-	if userPeer.ExpiresAt != p.ExpiresAt {
-		p.ExpiresAt = userPeer.ExpiresAt
-		if userPeer.ExpiresAt != nil {
-			// User explicitly set an expiration date, lock it
-			p.TTLLocked = true
-		}
-	}
-	
-	// Allow users to explicitly unlock TTL if they set ExpiresAt to nil
-	// This means peer will revert to activity-based TTL tracking
-	if userPeer.ExpiresAt == nil && p.ExpiresAt != nil {
-		p.TTLLocked = false
-	}
+	// Update ExpiresAt without changing TTLLocked
+	// TTLLocked is managed separately and shouldn't be changed during a regular peer update
+	p.ExpiresAt = userPeer.ExpiresAt
 	
 	p.Disabled = userPeer.Disabled
 	p.DisabledReason = userPeer.DisabledReason

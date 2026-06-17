@@ -439,9 +439,6 @@ func (c *StatisticsCollector) markPeerDisconnected(ctx context.Context, peerID d
 		return
 	}
 
-	// Capture the updated status and peer for publishing the event
-	var updatedStatus domain.PeerStatus
-
 	err = c.db.UpdatePeerStatus(ctx, peerID,
 		func(p *domain.PeerStatus) (*domain.PeerStatus, error) {
 			// Set peer as disconnected regardless of current state
@@ -466,9 +463,6 @@ func (c *StatisticsCollector) markPeerDisconnected(ctx context.Context, peerID d
 			// Pass true to indicate state change (from possibly connected to disconnected)
 			c.updatePeerMetrics(ctx, *p, true)
 
-			// Capture the updated status for event publishing
-			updatedStatus = *p
-
 			return p, nil
 		})
 
@@ -477,20 +471,8 @@ func (c *StatisticsCollector) markPeerDisconnected(ctx context.Context, peerID d
 		return
 	}
 
-	// After marking disconnected, we need to trigger TTL update
-	// Get the peer from DB and publish state change event with captured status
-	dbPeer, err := c.db.GetPeer(ctx, peerID)
-	if err != nil {
-		slog.Warn("failed to get peer for TTL update event", "peer", peerID, "error", err)
-		return
-	}
-
-	// Publish the state change event so handlePeerStateChangeEvent can update the TTL
-	// This ensures DefaultUserTTL is applied when peer disconnects
-	slog.Debug("publishing peer state change for TTL update", "peer", peerID, "is_connected", updatedStatus.IsConnected)
-	if c.bus != nil {
-		c.bus.Publish(app.TopicPeerStateChanged, updatedStatus, *dbPeer)
-	}
+	// TTL updates are handled by runExpiredPeersCheck() on master node
+	// No event-driven TTL update needed - periodic check is sufficient
 }
 
 // filterActivePeers returns only peers that had a handshake within the last 2 minutes.

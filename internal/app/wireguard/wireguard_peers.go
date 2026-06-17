@@ -634,6 +634,19 @@ func (m Manager) UpdatePeer(ctx context.Context, peer *domain.Peer) (*domain.Pee
 		}
 	}
 
+	// CRITICAL: After peer update, re-register metrics if peer is not expired
+	// This ensures metrics persist after being updated (e.g., during TTL renewal)
+	// Metrics were cleared during database save to avoid duplicates, now re-register them
+	if peer.ExpiresAt == nil || peer.ExpiresAt.After(time.Now()) {
+		// Peer is not expired - re-register metrics for monitoring
+		// This handles the case where TTL was renewed and metrics need to be restored
+		slog.Debug("[METRICS_RESTORE] re-registering metrics after peer update",
+			"peer_id", peer.Identifier,
+			"expires_at", peer.ExpiresAt,
+			"ttl_locked", peer.TTLLocked)
+		m.statsCollector.ms.RegisterPeerMetrics(peer)
+	}
+
 	m.bus.Publish(app.TopicPeerUpdated, *peer) // Webhooks receive full peer
 
 	// CRITICAL: Only publish sync event if something meaningful changed

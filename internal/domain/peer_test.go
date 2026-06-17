@@ -94,13 +94,42 @@ func TestPeer_GenerateDisplayName(t *testing.T) {
 }
 
 func TestPeer_OverwriteUserEditableFields(t *testing.T) {
+	now := time.Now()
+	
+	// Test 1: Basic field override
 	peer := &Peer{}
 	userPeer := &Peer{
 		DisplayName: "New DisplayName",
 	}
-
 	peer.OverwriteUserEditableFields(userPeer, &config.Config{})
 	assert.Equal(t, "New DisplayName", peer.DisplayName)
+	
+	// Test 2: ExpiresAt override should NOT change TTLLocked
+	// This is critical: OverwriteUserEditableFields should only copy data,
+	// TTLLocked is managed separately and shouldn't be touched during update
+	peer = &Peer{
+		ExpiresAt: &now,
+		TTLLocked: true, // Initially locked
+	}
+	futureTime := now.Add(48 * time.Hour)
+	userPeer = &Peer{
+		ExpiresAt: &futureTime,
+	}
+	peer.OverwriteUserEditableFields(userPeer, &config.Config{})
+	assert.Equal(t, &futureTime, peer.ExpiresAt)
+	assert.True(t, peer.TTLLocked, "TTLLocked should not be changed by OverwriteUserEditableFields")
+	
+	// Test 3: ExpiresAt set to nil should NOT unlock TTL
+	peer = &Peer{
+		ExpiresAt: &now,
+		TTLLocked: true,
+	}
+	userPeer = &Peer{
+		ExpiresAt: nil,
+	}
+	peer.OverwriteUserEditableFields(userPeer, &config.Config{})
+	assert.Nil(t, peer.ExpiresAt)
+	assert.True(t, peer.TTLLocked, "TTLLocked should remain unchanged")
 }
 
 func TestPeer_GetPresharedKey(t *testing.T) {
