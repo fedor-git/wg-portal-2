@@ -194,10 +194,10 @@ func (m Manager) connectToMessageBus() {
 	_ = m.bus.Subscribe(app.TopicAuthLogin, m.handleUserLoginEvent)
 	_ = m.bus.Subscribe(app.TopicUserDisabled, m.handleUserDisabledEvent)
 	_ = m.bus.Subscribe(app.TopicUserEnabled, m.handleUserEnabledEvent)
-	_ = m.bus.Subscribe(app.TopicPeerStateChanged, m.handlePeerStateChangeEvent)
 	_ = m.bus.Subscribe(app.TopicUserDeleted, m.handleUserDeletedEvent)
 	_ = m.bus.Subscribe(app.TopicPeerInterfaceUpdated, m.handlePeerInterfaceUpdatedEvent)
 	_ = m.bus.Subscribe(app.TopicPeersExpiredRemoved, m.handlePeersExpiredRemovedEvent)
+	_ = m.bus.Subscribe(app.TopicPeerStateChanged, m.handlePeerStateChangeEvent)
 
 	// Event-driven peer synchronization across nodes
 	_ = m.bus.Subscribe(app.TopicPeerCreatedSync, m.handlePeerCreatedSyncEvent)
