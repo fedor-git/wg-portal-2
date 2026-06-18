@@ -530,26 +530,26 @@ func (m Manager) handlePeerStateChangeEvent(peerStatus domain.PeerStatus, peer d
 		return
 	}
 
-	// Skip TTL update if TTL is locked (explicitly set)
+	// Skip TTL update if TTL is locked (explicitly set by user)
 	if peer.TTLLocked {
 		slog.Debug("skipping TTL update - TTL is locked for peer", "peer", peer.Identifier)
 		return
 	}
 
-	// Also skip if peer has an explicit future expiration date already set
-	// This covers cases where:
-	// 1. TTLLocked wasn't set during peer creation (legacy peers)
-	// 2. User explicitly set ExpiresAt via API update without setting TTLLocked
-	if peer.ExpiresAt != nil && peer.ExpiresAt.After(time.Now().Add(1*time.Hour)) {
-		slog.Debug("skipping TTL update - peer has explicit future expiration date",
+	// Skip TTL update for offline peers ONLY if they already have a future expiration set
+	// This prevents unnecessary updates for disconnected peers that will soon be cleaned up
+	// BUT: For online peers, ALWAYS update TTL regardless of current ExpiresAt
+	// (online peers must keep TTL renewed or they'll be deleted while still connected)
+	if !peerStatus.IsConnected && peer.ExpiresAt != nil && peer.ExpiresAt.After(time.Now().Add(1*time.Hour)) {
+		slog.Debug("skipping TTL update - offline peer has sufficient TTL remaining",
 			"peer", peer.Identifier,
 			"expires_at", peer.ExpiresAt.Format(time.RFC3339))
 		return
 	}
 
-	// Always update TTL when peer state changes
-	// - If peer is ONLINE: renews TTL (peer is active, defer deletion)
-	// - If peer is OFFLINE: sets TTL timer (countdown to removal)
+	// Update TTL when peer state changes:
+	// - If peer is ONLINE: ALWAYS renew TTL (prevents deletion while connected)
+	// - If peer is OFFLINE: set TTL countdown (schedule for removal)
 	expiryTime := time.Now().Add(ttlDuration)
 
 	logAction := "setting TTL"
