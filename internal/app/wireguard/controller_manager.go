@@ -64,6 +64,26 @@ func NewControllerManager(cfg *config.Config) (*ControllerManager, error) {
 	return c, nil
 }
 
+// NewControllerManagerWithControllers creates a ControllerManager that uses the given controllers
+// instead of registering the local and Mikrotik backends from the configuration.
+func NewControllerManagerWithControllers(
+	cfg *config.Config,
+	controllers map[domain.InterfaceBackend]InterfaceController,
+) *ControllerManager {
+	c := &ControllerManager{
+		cfg:         cfg,
+		controllers: make(map[domain.InterfaceBackend]backendInstance, len(controllers)),
+	}
+	for id, impl := range controllers {
+		c.controllers[id] = backendInstance{
+			Config:         config.BackendBase{Id: string(id), DisplayName: string(id)},
+			Implementation: impl,
+		}
+	}
+
+	return c
+}
+
 func (c *ControllerManager) init() error {
 	if err := c.registerLocalController(); err != nil {
 		return err

@@ -1276,7 +1276,42 @@ func (r *SqlRepo) upsertUser(ui *domain.ContextUserInfo, tx *gorm.DB, user *doma
 
 // UpdateInterfaceStatus updates the interface status with the given id.
 // If no interface status is found, a new one is created.
+// All cluster nodes update the same row, so the row is locked (FOR UPDATE) and the transaction
+// is retried on deadlocks / "Record has changed since last read" conflicts.
 func (r *SqlRepo) UpdateInterfaceStatus(
+	ctx context.Context,
+	id domain.InterfaceIdentifier,
+	updateFunc func(in *domain.InterfaceStatus) (*domain.InterfaceStatus, error),
+) error {
+	const maxRetries = 5
+	var err error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			waitTime := time.Duration(50*(1<<uint(attempt-1)))*time.Millisecond +
+				time.Duration(rand.Intn(50))*time.Millisecond
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(waitTime):
+			}
+		}
+
+		err = r.updateInterfaceStatusOnce(ctx, id, updateFunc)
+		if err == nil || !isRetryableTxError(err) {
+			return err
+		}
+	}
+
+	return fmt.Errorf("UpdateInterfaceStatus failed after %d attempts: %w", maxRetries, err)
+}
+
+func isRetryableTxError(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "Deadlock") || strings.Contains(msg, "Record has changed")
+}
+
+func (r *SqlRepo) updateInterfaceStatusOnce(
 	ctx context.Context,
 	id domain.InterfaceIdentifier,
 	updateFunc func(in *domain.InterfaceStatus) (*domain.InterfaceStatus, error),
@@ -1313,13 +1348,23 @@ func (r *SqlRepo) getOrCreateInterfaceStatus(tx *gorm.DB, id domain.InterfaceIde
 ) {
 	var in domain.InterfaceStatus
 
+	// Lock the existing row first so that a concurrent update from another node waits instead of
+	// failing with a snapshot conflict.
+	err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("identifier = ?", id).First(&in).Error
+	if err == nil {
+		return &in, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
 	// defaults will be applied to newly created record
 	defaults := domain.InterfaceStatus{
 		InterfaceId: id,
 		UpdatedAt:   time.Now(),
 	}
 
-	err := tx.Attrs(defaults).FirstOrCreate(&in, id).Error
+	err = tx.Attrs(defaults).FirstOrCreate(&in, id).Error
 	if err != nil {
 		return nil, err
 	}

@@ -141,7 +141,7 @@ func main() {
 		go func() {
 			syncCtx := domain.SetUserInfo(ctx, domain.SystemAdminContextUserInfo())
 			slog.Info("starting background initial sync")
-			if err := wireGuardManager.RestoreInterfaceState(syncCtx, true /*updateDbOnError*/); err != nil {
+			if err := wireGuardManager.RestoreInterfaceState(syncCtx); err != nil {
 				slog.Error("initial interface restore failed", "err", err)
 			}
 		}()

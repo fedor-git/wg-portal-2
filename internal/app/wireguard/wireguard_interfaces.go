@@ -195,11 +195,18 @@ func (m Manager) ApplyPeerDefaults(ctx context.Context, in *domain.Interface) er
 	return nil
 }
 
+// Backoff used while waiting for a physical interface to come up during state restore.
+var (
+	RestoreRetryInitialDelay = 100 * time.Millisecond
+	RestoreRetryMaxDelay     = 5 * time.Second
+)
+
 // RestoreInterfaceState restores the state of all physical interfaces and their peers.
 // The final state of the interfaces and peers will be the same as stored in the database.
+// The database holds the desired state shared by all cluster nodes, so a local failure to
+// bring up a physical interface (e.g. right after a reboot) never disables it in the database.
 func (m Manager) RestoreInterfaceState(
 	ctx context.Context,
-	updateDbOnError bool,
 	filter ...domain.InterfaceIdentifier,
 ) error {
 	if err := domain.ValidateAdminAccessRights(ctx); err != nil {
@@ -216,6 +223,15 @@ func (m Manager) RestoreInterfaceState(
 			continue // ignore filtered interface
 		}
 
+		// Older versions persisted this reason when the physical interface could not be created
+		// during startup (e.g. after a reboot). It is not a user decision, so bring it back up.
+		if iface.IsDisabled() && iface.DisabledReason == domain.DisabledReasonInterfaceMissing {
+			slog.InfoContext(ctx, "[RESTORE_INTERFACE] re-enabling interface that was auto-disabled as missing",
+				"interface", iface.Identifier)
+			iface.Disabled = nil
+			iface.DisabledReason = ""
+		}
+
 		peers, err := m.db.GetInterfacePeers(ctx, iface.Identifier)
 		if err != nil {
 			return fmt.Errorf("failed to load peers for %s: %w", iface.Identifier, err)
@@ -225,29 +241,20 @@ func (m Manager) RestoreInterfaceState(
 		if err != nil && !iface.IsDisabled() {
 			slog.Debug("creating missing interface", "interface", iface.Identifier)
 
-			// Save original interface state before temporarily disabling it
 			originalIface := iface
 			// Ensure SaveConfig is set correctly based on current config
 			originalIface.SaveConfig = m.cfg.Advanced.ConfigStoragePath != ""
 
-			// temporarily disable interface in database so that the current state is reflected correctly
-			_ = m.db.SaveInterface(ctx, iface.Identifier,
-				func(in *domain.Interface) (*domain.Interface, error) {
-					now := time.Now()
-					in.Disabled = &now // set
-					in.DisabledReason = domain.DisabledReasonInterfaceMissing
-					return in, nil
-				})
-
-			// try to create a new interface using the original state (not disabled)
-			// with retry logic for slow-starting interfaces (e.g., after reboot)
+			// try to create a new interface with retry logic for slow-starting interfaces (e.g., after reboot)
 			maxRetries := 10
-			retryDelay := 100 * time.Millisecond
+			retryDelay := RestoreRetryInitialDelay
 			var createdIface *domain.Interface
 			var saveErr error
 
 			for attempt := 0; attempt <= maxRetries; attempt++ {
-				createdIface, saveErr = m.saveInterface(ctx, &originalIface)
+				// The physical interface is down, so treat this as a down->up transition
+				// (runs PreUp/PostUp hooks and restores peers) without touching the shared database state.
+				createdIface, saveErr = m.saveInterfaceWithState(ctx, &originalIface, false, true)
 				if saveErr == nil {
 					break // success
 				}
@@ -262,24 +269,14 @@ func (m Manager) RestoreInterfaceState(
 					// Exponential backoff with max 5 seconds
 					time.Sleep(retryDelay)
 					nextDelay := retryDelay * 2
-					if nextDelay > 5*time.Second {
-						nextDelay = 5 * time.Second
+					if nextDelay > RestoreRetryMaxDelay {
+						nextDelay = RestoreRetryMaxDelay
 					}
 					retryDelay = nextDelay
 				}
 			}
 
 			if saveErr != nil {
-				if updateDbOnError {
-					// disable interface in database as no physical interface exists
-					_ = m.db.SaveInterface(ctx, iface.Identifier,
-						func(in *domain.Interface) (*domain.Interface, error) {
-							now := time.Now()
-							in.Disabled = &now // set
-							in.DisabledReason = domain.DisabledReasonInterfaceMissing
-							return in, nil
-						})
-				}
 				return fmt.Errorf("failed to create physical interface %s after %d attempts: %w", iface.Identifier, maxRetries+1, saveErr)
 			}
 
@@ -293,7 +290,7 @@ func (m Manager) RestoreInterfaceState(
 
 			// try to move interface to stored state with retry logic for slow-starting interfaces
 			maxRetries := 10
-			retryDelay := 100 * time.Millisecond
+			retryDelay := RestoreRetryInitialDelay
 			var restoreErr error
 
 			for attempt := 0; attempt <= maxRetries; attempt++ {
@@ -312,29 +309,14 @@ func (m Manager) RestoreInterfaceState(
 					// Exponential backoff with max 5 seconds
 					time.Sleep(retryDelay)
 					nextDelay := retryDelay * 2
-					if nextDelay > 5*time.Second {
-						nextDelay = 5 * time.Second
+					if nextDelay > RestoreRetryMaxDelay {
+						nextDelay = RestoreRetryMaxDelay
 					}
 					retryDelay = nextDelay
 				}
 			}
 
 			if restoreErr != nil {
-				if updateDbOnError {
-					// disable interface in database as no physical interface is available
-					_ = m.db.SaveInterface(ctx, iface.Identifier,
-						func(in *domain.Interface) (*domain.Interface, error) {
-							if iface.IsDisabled() {
-								now := time.Now()
-								in.Disabled = &now // set
-								in.DisabledReason = domain.DisabledReasonInterfaceMissing
-							} else {
-								in.Disabled = nil
-								in.DisabledReason = ""
-							}
-							return in, nil
-						})
-				}
 				return fmt.Errorf("failed to change physical interface state for %s after %d attempts: %w", iface.Identifier, maxRetries+1, restoreErr)
 			}
 		}
@@ -584,11 +566,20 @@ func (m Manager) saveInterface(ctx context.Context, iface *domain.Interface) (
 	*domain.Interface,
 	error,
 ) {
+	oldEnabled, newEnabled := m.getInterfaceStateHistory(ctx, iface)
+
+	return m.saveInterfaceWithState(ctx, iface, oldEnabled, newEnabled)
+}
+
+// saveInterfaceWithState saves the interface using an explicit previous/new enabled state, which decides
+// whether up/down hooks run and peers are restored.
+func (m Manager) saveInterfaceWithState(ctx context.Context, iface *domain.Interface, oldEnabled, newEnabled bool) (
+	*domain.Interface,
+	error,
+) {
 	if err := iface.Validate(); err != nil {
 		return nil, fmt.Errorf("interface validation failed: %w", err)
 	}
-
-	oldEnabled, newEnabled := m.getInterfaceStateHistory(ctx, iface)
 
 	if err := m.handleInterfacePreSaveHooks(iface, oldEnabled, newEnabled); err != nil {
 		return nil, fmt.Errorf("pre-save hooks failed: %w", err)
