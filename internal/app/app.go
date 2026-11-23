@@ -15,7 +15,7 @@ import (
 
 type WireGuardManager interface {
 	ImportNewInterfaces(ctx context.Context, filter ...domain.InterfaceIdentifier) (int, error)
-	RestoreInterfaceState(ctx context.Context, updateDbOnError bool, filter ...domain.InterfaceIdentifier) error
+	RestoreInterfaceState(ctx context.Context, filter ...domain.InterfaceIdentifier) error
 }
 
 type UserManager interface {
@@ -90,7 +90,7 @@ func (a *App) restoreInterfaceState(ctx context.Context) error {
 		return nil // feature disabled
 	}
 
-	err := a.wg.RestoreInterfaceState(ctx, true)
+	err := a.wg.RestoreInterfaceState(ctx)
 	if err != nil {
 		return err
 	}
